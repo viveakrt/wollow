@@ -1,0 +1,15 @@
+# Secrets
+.env
+
+# Go
+backend/data/
+backend/wollow-server
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# OS
+.DS_Store
+Thumbs.db

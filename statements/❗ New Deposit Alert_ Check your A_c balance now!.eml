@@ -1,0 +1,300 @@
+Delivered-To: carbonvivek@gmail.com
+Received: by 2002:a05:6358:5144:b0:2ab:e659:4e72 with SMTP id 4csp362791rwj;
+        Fri, 31 Jul 2026 05:02:14 -0700 (PDT)
+X-Received: by 2002:a05:6a21:62c1:b0:3c3:a20f:f720 with SMTP id adf61e73a8af0-3c91b3a9d73mr1654345637.36.1785499333899;
+        Fri, 31 Jul 2026 05:02:13 -0700 (PDT)
+ARC-Seal: i=1; a=rsa-sha256; t=1785499333; cv=none;
+        d=google.com; s=arc-20260327;
+        b=d/9bO/FjZMjs4WtNvL0sTV3L+HGIuRRx78SdsIKKJIiN+sZDOUvEP26ULit2fXSUTw
+         leXgBmFCSw9Ep7FtP8zJKB2fkeLbBHLaIQnHU12Dl1IcPmvTu+oTfmZVb3ri4i/PVdQe
+         60A6hE1by5FE8LKvtVZXpJcYr0fMsFISkUIrSY5487X5gOvDXf4C6cgBavKy/y21FJC2
+         vsiAAyJRSryki1ViY2cC5dHbmdvd5UQpGdBugTVfL7Ih4YKN+LeN9E6RtFF40CHWefHV
+         sQAK8ZnUVgpJ0AX7wdDlK2Yh1jys+2/zhtemSOkbCWPf3XiWhy5kFjoGHK1Vu/an7iOh
+         woSw==
+ARC-Message-Signature: i=1; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20260327;
+        h=date:from:subject:to:mime-version:dkim-signature:dkim-signature
+         :message-id;
+        bh=ap8Icxq35lxO8AGyFIW14uyEkjILd8+SSV2fHjdxaWY=;
+        fh=DOCFFdm7+icq49bdF4pBG8oSApZIYRSxnY/NK0+HDXs=;
+        b=cXDuAfnxv2aAVJmG+Cd8Nduqx40I76+lWWf9ltvlCLY6hx0YROC8KcPXAWmhky8Fe9
+         +P9o55NxS3Pqagt6LYj89uUUw1GBhiKfpbTBiwZ6I8EIfI0B23o3/XcgIWbveMJhCjP0
+         fqRp0jpyD3tioNu5ctBX8urK/pESscpybFnx7Rxae1bVQQkXkOXhVfUEQsNYPYgTeiNT
+         6TuR5CGYiwBCKBO/qqOV/Hy63rX0rPkTpHLEVFuP7bKyI7KPpvp65d4Ojga9j6BHa6t0
+         Z9w9HMmX2TDAsu1w/AYTiT5h2EHv72QIv5HXSbfHKAu7FFz1vxZy+R7WFn+hSNjWe8sj
+         8Knw==;
+        dara=google.com
+ARC-Authentication-Results: i=1; mx.google.com;
+       dkim=pass header.i=@hdfcbank.bank.in header.s=acls01 header.b=KoonMG7m;
+       dkim=pass header.i=@aclmobile.net header.s=5nXKKHgBnyGAcLwvMLZIq header.b=kl5X8Em6;
+       spf=pass (google.com: domain of a.1785499333308203531.47480.1156.1.1.0.0.1@comm.hdfcbank.bank.in designates 103.54.236.15 as permitted sender) smtp.mailfrom=A.1785499333308203531.47480.1156.1.1.0.0.1@comm.hdfcbank.bank.in;
+       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=hdfcbank.bank.in
+Return-Path: <A.1785499333308203531.47480.1156.1.1.0.0.1@comm.hdfcbank.bank.in>
+Received: from o15.smtp-out.aclmobile.net (o15.smtp-out.aclmobile.net. [103.54.236.15])
+        by mx.google.com with ESMTPS id a92af1059eb24-13fab4efc36si2267252c88.55.2026.07.31.05.02.13
+        for <carbonvivek@gmail.com>
+        (version=TLS1_3 cipher=TLS_AES_256_GCM_SHA384 bits=256/256);
+        Fri, 31 Jul 2026 05:02:13 -0700 (PDT)
+Received-SPF: pass (google.com: domain of a.1785499333308203531.47480.1156.1.1.0.0.1@comm.hdfcbank.bank.in designates 103.54.236.15 as permitted sender) client-ip=103.54.236.15;
+Authentication-Results: mx.google.com;
+       dkim=pass header.i=@hdfcbank.bank.in header.s=acls01 header.b=KoonMG7m;
+       dkim=pass header.i=@aclmobile.net header.s=5nXKKHgBnyGAcLwvMLZIq header.b=kl5X8Em6;
+       spf=pass (google.com: domain of a.1785499333308203531.47480.1156.1.1.0.0.1@comm.hdfcbank.bank.in designates 103.54.236.15 as permitted sender) smtp.mailfrom=A.1785499333308203531.47480.1156.1.1.0.0.1@comm.hdfcbank.bank.in;
+       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=hdfcbank.bank.in
+Message-ID: <6a6c8ec5.fdb6866b.27b88.5ed1SMTPIN_ADDED_BROKEN@mx.google.com>
+X-Google-Original-Message-ID: A.1785499333308203531.47480.1156.1.1.0.0.1#carbonvivek@gmail.com
+DKIM-Signature: v=1; a=rsa-sha256; d=hdfcbank.bank.in; s=acls01; c=relaxed/relaxed;
+	bh=ap8Icxq35lxO8AGyFIW14uyEkjILd8+SSV2fHjdxaWY=;
+	h=content-type:message-id:subject:date:mime-version:to:from; t=1785499333;
+	b=KoonMG7m/I3mm7vqNTJEihOjIqKm/CWxraq6863OoJ+/0OCbDF6Wbd6XZ4C3NpChcrOxAATdE
+	tirE++Qzb5hYv/NoKyEznVWP3jQHNxPeXLDMZAs6GYJdx0XAkkDUpKks+djx21z/6l8al4OGbLq
+	FlNRZJwtP57oxl9eb+a5BCV77Ndo2QK3vp2zaXqDBmJWtx/v2WpMZQMCeVweL8meiLV2ISchxqT
+	80Z4te6+uC3/91pzwIwy6E61yaXuea6XrFTXdBORI4AAHA8NZvn2dOv0ogIVZcc8J4vo+NhPTRy
+	gLaAYEDzClJqPYftLjAv6EAhzbDQSyfkhWAOF6upOEAw==;
+DKIM-Signature: v=1; a=rsa-sha256; d=aclmobile.net; s=5nXKKHgBnyGAcLwvMLZIq;
+	c=relaxed/relaxed; bh=ap8Icxq35lxO8AGyFIW14uyEkjILd8+SSV2fHjdxaWY=;
+	h=content-type:message-id:subject:date:mime-version:to:from; t=1785499333;
+	b=kl5X8Em6K9Yrehr2DYpNnSaZhcZMCWgPiG9Pn0nJAWC5QS1/DXw6XpSilKd+CfZ8PaPl+otO1
+	5M5iTp4pSBKZW5/Zi0/wwpvxopCQYZwguz23dNCuiMrxcqtHsz3h6/EUA7r59bXK3Ob8QyOWjvV
+	r2qDd9PQSI0jM4ccoxw55st5hTL25T6QoMpZPoZhGLMw3CNjlsZiynIlot4NUWORkpvQxgOVD3g
+	4ShWy8nx6eLSAhqieKcQCT480fNMad/7wMu0gieyLtb76ky7t97+1Rq24sVhyBrhg0HA35Rkazs
+	xPLLjvjnAn5fAsMmHNfNNpGx7UVG+VvYT/FqQoM4I6rw==;
+X-Ses-Configuration-Set: hdfc-c
+Mime-Version: 1.0
+X-Unique-Id: A.1785499333308203531.47480.1156.1.1.0.0.1#carbonvivek@gmail.com#{"divid":"INSTALRTFC","msgid":"RT-42682403355"}
+Content-Type: multipart/alternative;
+ boundary=151db294ec243d5e84dfc952a4f18b78384a8ece84d8e128b98ea12716de
+To: carbonvivek@gmail.com
+Subject: =?UTF-8?q?=E2=9D=97_New_Deposit_Alert:_Check_your_A/c_balance_now!?=
+From: HDFC Bank InstaAlerts <alerts@hdfcbank.bank.in>
+Date: Fri, 31 Jul 2026 17:32:13 +0530
+
+--151db294ec243d5e84dfc952a4f18b78384a8ece84d8e128b98ea12716de
+Content-Transfer-Encoding: quoted-printable
+Content-Type: text/html; charset=UTF-8
+
+<!doctype html>
+<html>
+
+<head>
+    <meta http-equiv=3D"Content-Type" content=3D"text/html; charset=3Dutf-8=
+">
+    <meta name=3D"viewport" content=3D"target-densitydpi=3Ddevice-dpi">
+    <meta name=3D"viewport" content=3D"width=3Ddevice-width; initial-scale=
+=3D1.0; maximum-scale=3D1.0; user-scalable=3D0;">
+    <meta name=3D"apple-mobile-web-app-capable" content=3D"yes">
+    <meta name=3D"HandheldFriendly" content=3D"true">
+    <meta name=3D"MobileOptimized" content=3D"width">
+    <title>HDFC BANK</title><!-- Facebook sharing information tags -->
+    <!--<meta property=3D"og:title" content=3D"HDFC BANK" />-->
+    <style type=3D"text/css">
+        @media screen and (min-device-width: 320px) and (max-device-width: =
+768px) {
+            table {
+                width: 100%;
+            }
+
+            .td {
+                padding: 0px 25px;
+                text-align: left;
+            }
+
+            .heading {
+                text-align: center;
+                padding: 0px 25px;
+            }
+
+            .cta {
+                padding: 0px 25px;
+                text-align: center;
+            }
+        }
+    </style>
+</head>
+
+<body data-new-gr-c-s-loaded=3D"14.1101.0">
+    <table width=3D"600" border=3D"0" cellspacing=3D"0" cellpadding=3D"0" a=
+lign=3D"center">
+        <tbody>
+			  <tr>
+                <td style=3D"border-bottom:1px solid #cccccc; border-top:1p=
+x solid #cccccc; border-left:1px solid #cccccc;border-right:1px solid #cccc=
+cc;">
+                    <table width=3D"100%" border=3D"0" cellspacing=3D"0" ce=
+llpadding=3D"0">
+                        <tbody>
+                            <tr>
+                                <td valign=3D"top" bgcolor=3D"#dcddde" styl=
+e=3D"line-height:0px;background-color:#dcddde; border-left:1px solid #dcddd=
+e;"><a href=3D"https://trkt.aclemails.com/v1/r/VBmb0UYKdlkQDBlp%2B2JuEUTOw4=
+Xpa9aMtsSl2lqiKnsYtk8spgTZtGIl10aK9g%2F87c8Ld9CcqkajyxFHKxbtTYRHK0oVZU01ok6=
+bK%2FysLMkLlnvkumZJOhrAm5RXVfpHVScmbY7zilIesTd1kTFOQ9c%2BxOlHes1fhWvZHSImQQ=
+mKqdX7BigOqzy3Ngl0iLVpmxOUaT7PuoqVEj2B%2Bq6VBEypZ%2FmHqB%2BQ6BfVvolx%2Fvl5k=
+6fZ%2BWuxZcg8uQ%2BQ1fiTCI6EBF5YoJ3cmBHLVRLsxBu7AOsQSlbBikcIYExkm1H1iZaKQWxI=
+OjUcrdV2sGk2HF5PIOjo1luKipalhcn92rpWxIIVblVTa0eOVX9kVkSSUG%2BHqsYllVbAEso99=
+as%2BDrCULvu%2BR0a7EHhVQ6MYRAWCj9B5O6mZpXndydgk3Cz2iPMJPilF8C8LxeAr"=20
+
+target=3D"_blank"><img src=3D"https://img.pinchappmails.com/hdfc/images/202=
+6/july/HDFC-Bank-Banner-Update-2026-07-22.png
+" style=3D"display: block; vertical-align: top" alt width=3D"100%" border=
+=3D"0"></a></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </td>
+            </tr>
+            <tr>
+                <td height=3D"20"></td>
+            </tr>
+            <tr>
+                <td valign=3D"top" bgcolor=3D"#dcddde" style=3D"line-height=
+:0px;background-color:#dcddde; border-left:1px solid #dcddde;"><img src=3D"=
+https://wgjpss.stripocdn.email/content/guids/CABINET_d17330eb5cbe5af68cf444=
+e0d9b181ad116d88b22fb8b3fd1c93e1846c59af76/images/nmbandnew.jpg" alt width=
+=3D"100%" border=3D"0"></td>
+            </tr>
+            <tr>
+                <td>
+                    <table width=3D"100%" border=3D"0" cellspacing=3D"0" ce=
+llpadding=3D"0">
+                        <tbody>
+                            <tr>
+                                <td valign=3D"top" align=3D"center">
+                                    <table align=3D"center" width=3D"550" b=
+order=3D"0" cellspacing=3D"0" cellpadding=3D"0">
+                                        <tbody>
+                                            <tr>
+                                                <td width=3D"550" valign=3D=
+"top" align=3D"center">
+                                                    <table align=3D"center"=
+ width=3D"100%" border=3D"0" cellspacing=3D"0" cellpadding=3D"0" style=3D"w=
+idth:100% !important; text-align: center">
+                                                        <tbody>
+                                                            <tr>
+                                                                <td height=
+=3D"15"></td>
+                                                            </tr>
+                                                        </tbody>
+                                                    </table>
+                                                </td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </td>
+            </tr>
+            <tr>
+                <td>
+                    <table width=3D"100%" border=3D"0" cellspacing=3D"0" ce=
+llpadding=3D"0">
+                        <tbody>
+                            <tr>
+                                <td valign=3D"top" align=3D"center">
+                                    <table align=3D"center" width=3D"550" b=
+order=3D"0" cellspacing=3D"0" cellpadding=3D"0">
+                                        <tbody>
+                                            <tr>
+                                                <td width=3D"550" valign=3D=
+"top" align=3D"center">
+                                                    <table align=3D"center"=
+ width=3D"100%" border=3D"0" cellspacing=3D"0" cellpadding=3D"0" style=3D"w=
+idth:100% !important; text-align: center">
+                                                        <tbody>
+                                                            <tr>
+                                                                <td height>=
+</td>
+                                                            </tr>
+                                                            <tr>
+                                                                <td align=
+=3D"left" valign=3D"middle" style=3D"font-family:Arial; font-size:16px; lin=
+e-height:22px; color:#000; font-weight: normal; text-align: left" class=3D"=
+td esd-text">Dear Customer,<br><br>You have received a credit in your HDFC =
+Bank account.<br><br>Details of the transaction:<br>  Amount received: INR =
+1,75,245.00<br>  Account: XX4125<br>  Date: 31-JUL-2026<br>  Reference Deta=
+ils: NEFT Cr-ICIC0099999-MANASH E COMMERCE PRIVATE LIMITED-Vivek Yadav-INXX=
+XXXXXXXX6993<br><br><br>Available Balance: INR 3,42,535.84<br><br>For real-=
+time account balance, please call 1800 270 3333.<br><br>Thank you for banki=
+ng with HDFC Bank.<br><br>Warm Regards,<br>HDFC Bank
+</td>
+                                                            </tr>
+                                                            <tr>
+                                                                <td height=
+=3D"25"></td>
+                                                            </tr>
+														=09
+															<tr>
+                                                                <td align=
+=3D"left" valign=3D"middle" style=3D"font-family:Arial; font-size:16px; lin=
+e-height:22px; color:#000; font-weight: normal; text-align: left" class=3D"=
+td esd-text">
+
+</td>
+                                                            </tr>
+                                                            <tr>
+                                                                <td height=
+=3D"25"></td>
+                                                            </tr>
+															<tr>
+                                                                <td align=
+=3D"left" valign=3D"middle" style=3D"font-family:Arial; font-size:16px; lin=
+e-height:22px; color:#000; font-weight: normal; text-align: left; border-bo=
+ttom: 2px solid #cccccc; padding-bottom: 0px" class=3D"td esd-text">
+</td>
+                                                            </tr>
+                                                            <tr>
+                                                                <td height=
+=3D"15"></td>
+                                                            </tr>
+                                                        </tbody>
+                                                    </table>
+                                                </td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </td>
+            </tr>
+          <tr>
+                <td valign=3D"top"  style=3D"line-height:0px; border-left:0=
+px solid #dcddde; padding-bottom: 5px"><img src=3D"https://img.pinchappmail=
+s.com/hdfc/images/2025/dec/Digital-Arrest-Scam_Insta-Alert-Banner_600-x-60_=
+Sep%2725+(1)+(1).jpg" alt width=3D"100%" border=3D"0"></td>
+            </tr>
+           =20
+            <tr>
+                <td style=3D"font-family:Arial,Helvetica,sans-serif;color:#=
+000000;padding-bottom:5px;padding-top:5px;text-align:left;font-size:12px;bo=
+rder:none;line-height:12px;padding-left:15px;padding-right:15px" align=3D"l=
+eft" class=3D"esd-text">For more details on Service charges and Fees, <a hr=
+ef=3D"https://trkt.aclemails.com/v1/r/zb4xyUJl0lCDv6y50LN3pqGPf8Uf2nsrf8vMZ=
+lxGkZlYELpyyhuFsEwCJ%2B6c6%2BgXhNtFe0aCPfcztE0KL0XQ79Ut5cAr7XHBAeV4hlCWRGct=
+DxROrvdQeAgN0cNwgXeqDNiD%2FT4RhImWzU8S94iB5L5wv09FxSgSJmCL2aW%2Fj2u2fGFKJWa=
+exxKfZr6vGfu6yAlCECAQUkxwYfNwVsImRHTtNLcX6F88sROPuktfJqrzT6f%2F0mPaDSGwp8e%=
+2FxVCmvAxEPnZnZ8IAmemXfbmzj59jXYE4dmM%3D" style=3D"text-decoration:underlin=
+e;color:#004b8d;outline:none" target=3D"_blank"><strong> click here.</stron=
+g></a></td>
+            </tr>
+           =20
+           =20
+            <tr>
+                <td style=3D"font-family:Arial,Helvetica,sans-serif;color:#=
+000000;text-align:left;font-size:12px;border:none;padding-left:15px" align=
+=3D"left" width=3D"30%" class=3D"esd-text">=C2=A9 HDFC Bank <span style=3D"=
+font-size: 3px"></span></td>
+            </tr>
+			 =20
+          =20
+        </tbody>
+    </table>
+</body>
+
+</html><img src=3D"https://trkt.aclemails.com/v1/w/3oSQ5KLaC%2B0LvM1s2uPCbP=
+Vmke0GBLd%2BTrua7OBOLYhZTe5GfeDOSyOkFYbVp5OgDpHmFS8pRzFnGoKYP%2F6CkeBiIOjcu=
+9TP5bCGogj%2B%2FNVM7yePO2PPAIHXtefvYVyyLy4Fi9kXV4fjpGVIUDQktAaNMRdFSwOELhVS=
+vgThZZHPY8aVDQWzzPdDR7e7izOngMvN"  width=3D"1" height=3D"1" border=3D"0">
+--151db294ec243d5e84dfc952a4f18b78384a8ece84d8e128b98ea12716de--

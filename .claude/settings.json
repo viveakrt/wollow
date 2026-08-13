@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go get *)",
+      "Bash(ls \"C:\\\\Users\\\\carbo\\\\go\\\\pkg\\\\mod\\\\github.com\\\\emersion\\\\go-imap\\\\v2@v2.0.0-beta.8\\\\imapclient\\\\\" | head -50)",
+      "Read(//c/Users/carbo/go/pkg/mod/github.com/emersion/go-imap/v2@v2.0.0-beta.8/**)",
+      "Bash(ls \"/c/Users/carbo/go/pkg/mod/github.com/emersion/go-imap/v2@v2.0.0-beta.8/imapclient/\")",
+      "Read(//c/Users/carbo/go/pkg/mod/github.com/emersion/go-imap/v2@v2.0.0-beta.8/imapclient//**)",
+      "Bash(go vet *)",
+      "Read(//c/Users/carbo/go/pkg/mod/github.com/emersion/go-imap/v2@v2.0.0-beta.8/imapclient/**)",
+      "Bash(grep -n \"func UIDSetNum\\\\|func SeqSetNum\\\\|type UIDSet\\\\|type SeqSet\\\\|func.*UIDSet.*AddNum\\\\|type Flag \\\\|FlagSeen\\\\|FlagFlagged\\\\|FlagDeleted\\\\|func ParseUID\\\\|type UID \" \"/c/Users/carbo/go/pkg/mod/github.com/emersion/go-imap/v2@v2.0.0-beta.8/\"*.go 2>/dev/null | head -60)",
+      "Bash(grep -n \"func.*Envelope\\\\|type Envelope\\\\|type Address\" \"/c/Users/carbo/go/pkg/mod/github.com/emersion/go-imap/v2@v2.0.0-beta.8/imap.go\" | head -20)",
+      "Read(//c/Users/carbo/go/pkg/mod/github.com/emersion/go-imap/v2@v2.0.0-beta.8//**)",
+      "Bash(flutter --version)",
+      "Bash(grep -n \"^func \\\\|^type \" \"/c/Users/carbo/go/pkg/mod/github.com/emersion/go-message@v0.18.2/mail/reader.go\" 2>/dev/null | head -30)",
+      "Read(//c/Users/carbo/go/pkg/mod/github.com/emersion/go-message@v0.18.2/mail/**)",
+      "Bash(flutter create *)",
+      "Bash(cd \"c:/Users/carbo/Desktop/Vivek/Wollow/frontend\" && cat pubspec.yaml | grep -A2 riverpod && find / -maxdepth 0 2>/dev/null; flutter pub deps 2>&1 | grep -i riverpod)",
+      "Read(//c//**)",
+      "Bash(go mod *)",
+      "Bash(gofmt -l internal/mail/imap.go)",
+      "Bash(ls \"/c/Users/carbo/AppData/Local/Pub/Cache/hosted/pub.dev\" 2>/dev/null | grep -i riverpod)",
+      "Read(//c/Users/carbo/AppData/Local/Pub/Cache/hosted/pub.dev/**)",
+      "Bash(grep -n \"class AsyncNotifierProvider\" -A 40 \"/c/Users/carbo/AppData/Local/Pub/Cache/hosted/pub.dev/riverpod-3.3.2/lib/src/providers/async_notifier.dart\" | head -60)",
+      "Read(//c/Users/carbo/AppData/Local/Pub/Cache/hosted/pub.dev/riverpod-3.3.2/lib/src/providers/**)",
+      "Bash(grep -rn \"^class AsyncNotifierProvider\\\\|^final class AsyncNotifierProvider\" \"/c/Users/carbo/AppData/Local/Pub/Cache/hosted/pub.dev/riverpod-3.3.2/lib/\" 2>/dev/null)",
+      "Read(//c/Users/carbo/AppData/Local/Pub/Cache/hosted/pub.dev/riverpod-3.3.2/lib//**)",
+      "Read(//c/Users/carbo/AppData/Local/Pub/Cache/hosted/pub.dev/riverpod-3.3.2/lib/src/providers/async_notifier/**)",
+      "Read(//c/Users/carbo/AppData/Local/Pub/Cache/hosted/pub.dev/riverpod-3.3.2/lib/src/**)",
+      "Bash(grep -n \"arg\" \"/c/Users/carbo/AppData/Local/Pub/Cache/hosted/pub.dev/riverpod-3.3.2/lib/src/framework.dart\" 2>/dev/null | grep -i \"get arg\\\\|ArgT arg\" | head -10; echo \"---\"; grep -rln \"get arg\" \"/c/Users/carbo/AppData/Local/Pub/Cache/hosted/pub.dev/riverpod-3.3.2/lib/src/\" 2>/dev/null)",
+      "Read(//c/Users/carbo/AppData/Local/Pub/Cache/hosted/pub.dev/riverpod-3.3.2/lib/src//**)",
+      "Bash(grep -n \"class AnyNotifier\\\\|ArgT\\\\|argument\" \"/c/Users/carbo/AppData/Local/Pub/Cache/hosted/pub.dev/riverpod-3.3.2/lib/src/core/provider/notifier_provider.dart\" 2>/dev/null | head -30)",
+      "Read(//c/Users/carbo/AppData/Local/Pub/Cache/hosted/pub.dev/riverpod-3.3.2/lib/src/core/provider/**)",
+      "Bash(flutter test *)",
+      "Bash(docker build *)"
+    ]
+  }
+}

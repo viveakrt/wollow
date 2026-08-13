@@ -1,0 +1,1025 @@
+Delivered-To: carbonvivek@gmail.com
+Received: by 2002:a05:6359:3914:b0:2af:9ff8:2429 with SMTP id xa20csp581355rwb;
+        Thu, 13 Aug 2026 03:40:49 -0700 (PDT)
+X-Received: by 2002:a05:6a21:3282:b0:3c3:b57b:6459 with SMTP id adf61e73a8af0-3cc54f3e1demr6045610637.7.1786617649220;
+        Thu, 13 Aug 2026 03:40:49 -0700 (PDT)
+ARC-Seal: i=1; a=rsa-sha256; t=1786617649; cv=none;
+        d=google.com; s=arc-20260327;
+        b=k+7CZBvJTzUqPxDkAW18TJu1ilk7q1ZztBXKhk969ECr6IF80sCD1W2UGFl/1/wacb
+         pJ3fn5BMQO32cKqiaoXgUyLs6qS18OjGZfsq8hoq+b8oEfWUiHAGejU+2n8bzzDZaO/E
+         NF+Z8k7hcIjkf7MFk9dL3XDy5PpN7vwiAqUuhRWYn128ssquzQ3y/rJBMquK/+Jof6ke
+         odhIKIWAMLNmkOwc7eds4w0UTbxZpe471zK/tEGsud9j38pZTUqEAMR+K5/EfxRNLmud
+         XSc5aPwfdf/gstcl1xx9PLmCNtPJoOYPf6MgOFDrwIoG0ZGL4mQJ8FqW5zKIY2WIYLNG
+         bqkg==
+ARC-Message-Signature: i=1; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20260327;
+        h=feedback-id:date:message-id:mime-version:subject:to:from
+         :dkim-signature:dkim-signature;
+        bh=B4QE0YmzFH06qWv4d6ChtPFRANsgletGanB1SZHqdXE=;
+        fh=DOCFFdm7+icq49bdF4pBG8oSApZIYRSxnY/NK0+HDXs=;
+        b=bel+Llbp6EEwI2J45Rtqdn2+IzoYXALEEv2aUtHT/0AVYRreOtKIEscAE9JA1F82Ai
+         xXjq/V1/uwbP3Dsk+1MK04cd3S7+LNoMzLOe5LzD6sF+QdwxGEH9vr7FOmr/n20PMO4o
+         bTpfZOGzktpGyz6Eet4DagUxlk9/aDlva008CBv9girhZjta4RzytjRGNSt46a99ppka
+         awQW9y1iq9mDxZ2jcBuSnxpoJoD4DFnWL3KKwbPULrGF/2NBZTm5XkZR7qFtwrE08dt7
+         xiWKdTBAuz/2cb39ulJpSAVVwmy2JRcfhBoO5a4SGvUUeIcjC3JrrJYH6VHBSQsMz3vl
+         Dwrw==;
+        dara=google.com
+ARC-Authentication-Results: i=1; mx.google.com;
+       dkim=pass header.i=@amazonpay.in header.s=ike76fdpjlxn7w5vnhxkygayowgsqe6s header.b=KskYnNlR;
+       dkim=pass header.i=@amazonses.com header.s=rlntogby6xsxlfnvyxwnvvhttakdsqto header.b=icRNbfbL;
+       spf=pass (google.com: domain of 0109019ffab5d56f-ab681211-0c79-46d4-8740-60e95e6f3269-000000@ap-south-1.amazonses.com designates 76.223.153.177 as permitted sender) smtp.mailfrom=0109019ffab5d56f-ab681211-0c79-46d4-8740-60e95e6f3269-000000@ap-south-1.amazonses.com;
+       dmarc=pass (p=QUARANTINE sp=QUARANTINE dis=NONE) header.from=amazonpay.in
+Return-Path: <0109019ffab5d56f-ab681211-0c79-46d4-8740-60e95e6f3269-000000@ap-south-1.amazonses.com>
+Received: from c153-177.smtp-out.ap-south-1.amazonses.com (c153-177.smtp-out.ap-south-1.amazonses.com. [76.223.153.177])
+        by mx.google.com with ESMTPS id 5a478bee46e88-31ec0a24d99si6660002eec.66.2026.08.13.03.40.48
+        for <carbonvivek@gmail.com>
+        (version=TLS1_3 cipher=TLS_AES_128_GCM_SHA256 bits=128/128);
+        Thu, 13 Aug 2026 03:40:49 -0700 (PDT)
+Received-SPF: pass (google.com: domain of 0109019ffab5d56f-ab681211-0c79-46d4-8740-60e95e6f3269-000000@ap-south-1.amazonses.com designates 76.223.153.177 as permitted sender) client-ip=76.223.153.177;
+Authentication-Results: mx.google.com;
+       dkim=pass header.i=@amazonpay.in header.s=ike76fdpjlxn7w5vnhxkygayowgsqe6s header.b=KskYnNlR;
+       dkim=pass header.i=@amazonses.com header.s=rlntogby6xsxlfnvyxwnvvhttakdsqto header.b=icRNbfbL;
+       spf=pass (google.com: domain of 0109019ffab5d56f-ab681211-0c79-46d4-8740-60e95e6f3269-000000@ap-south-1.amazonses.com designates 76.223.153.177 as permitted sender) smtp.mailfrom=0109019ffab5d56f-ab681211-0c79-46d4-8740-60e95e6f3269-000000@ap-south-1.amazonses.com;
+       dmarc=pass (p=QUARANTINE sp=QUARANTINE dis=NONE) header.from=amazonpay.in
+DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/simple;
+	s=ike76fdpjlxn7w5vnhxkygayowgsqe6s; d=amazonpay.in; t=1786617648;
+	h=From:To:Subject:MIME-Version:Content-Type:Message-ID:Date;
+	bh=TXUCtZQiaDU5MbYttwidIkrZyu1kUMs5TSyztvxPS00=;
+	b=KskYnNlRyPz1UYw3CAhzz6cZG8c/G3+UgAPZtfjpE4oxIBquK0cdcaKB/i1nkm/j
+	gUcHzZs2lIUSkB2wDJnKn83pb78TVJlEUFUzCxLq22AscR6IwROHGNi4CbWtL7Tn30l
+	uUt9uiqnIL0BqlfIpg9KmrkLl1lT8V25EztSFOW4=
+DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/simple;
+	s=rlntogby6xsxlfnvyxwnvvhttakdsqto; d=amazonses.com; t=1786617648;
+	h=From:To:Subject:MIME-Version:Content-Type:Message-ID:Date:Feedback-ID;
+	bh=TXUCtZQiaDU5MbYttwidIkrZyu1kUMs5TSyztvxPS00=;
+	b=icRNbfbLautVh4WEnFgleha1jfiIenm/LI/+ABffIfeBgqQD+39kGKBRPxqBts+e
+	E6r/S+W/VuHAFocCDLd/7546wyugVhpEzZL/Qdx01U42qM68PffE7HZLo32lj5z/Zrz
+	Oiskqv2ImoYCwTuoj1hf6WxUKqbndYYGdOSYa0tI=
+From: Amazon Pay India <no-reply@amazonpay.in>
+To: carbonvivek@gmail.com
+Subject: Your monthly reward points for using Amazon Pay ICICI Bank credit
+ card added to your Amazon Pay balance
+MIME-Version: 1.0
+Content-Type: multipart/alternative; 
+	boundary="----=_Part_948805_940201501.1786617648495"
+Message-ID: <0109019ffab5d56f-ab681211-0c79-46d4-8740-60e95e6f3269-000000@ap-south-1.amazonses.com>
+Date: Thu, 13 Aug 2026 10:40:48 +0000
+Feedback-ID: ::1.ap-south-1.Ayedjvnmh4ewnJCVf6wn/4vTujvP3YiYzbT+M4TWyZU=:AmazonSES
+X-SES-Outgoing: 2026.08.13-76.223.153.177
+
+------=_Part_948805_940201501.1786617648495
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: quoted-printable
+
+Dear Customer,Thank you for using Amazon Pay ICICI Bank Credit Card. We hav=
+e added reward points basis your last month=E2=80=99s billing cycle to your=
+ Amazon Pay balance =E2=80=98Gifts and Credits=E2=80=99.
+------=_Part_948805_940201501.1786617648495
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: quoted-printable
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<html>
+<head>
+<title>Amazon.in Order</title>
+<!--meta tag for responsive mail-->
+<meta name=3D"viewport" content=3D"width=3Ddevice-width, initial-scale=3D1.=
+0">
+<meta http-equiv=3D"Content-Type" content=3D"text/html; charset=3DUTF-8" />
+<!--meta tag for windows phone-->
+<meta http-equiv=3D"X-UA-Compatible" content=3D"IE=3Dedge" />
+<style>
+  body {
+    background-color: #FFFFFF;
+    }
+
+  div br {
+    display: block;
+    }
+
+  #notification {
+    width: 360px;
+    table-layout:fixed;
+  }
+
+  #greetings {
+    font-style: normal;
+    font-weight: 400;
+    font-size: 16px;
+    line-height: 20px;
+    color: #232F3E;
+  }
+
+  #messageText {
+   font-family: "Amazon Ember";
+    font-style: normal;
+    font-weight: 700;
+    font-size: 18px;
+    line-height: 24px;
+    color: #232F3E;
+  }
+
+  #paymentStatus {
+    font-size: 21px;
+    line-height: 30px;
+  }
+
+ #paymentHighlightsHeading1, #paymentHighlightsHeading2 {
+    color: #767676;
+    font-size: 13px;
+    line-height: 20px;
+    font-family: "Amazon Ember";
+  }
+
+  #paymentHighlightsHeading2 {
+    padding-right: 17px;
+    text-align: right;
+  }
+
+  #bankName {
+    font-size: 24px;
+    line-height: 31px;
+    width: 123px;
+    font-family: "Amazon Ember";
+  }
+
+    #MerchantName {
+    width: 123px;
+    font-family: "Amazon Ember";
+    font-style: normal;
+    font-weight: 700;
+    font-size: 18px;
+    line-height: 24px;
+    color: #232F3E;
+  }
+  #MerchantName {
+      padding-left: 5px !important;
+      width: 129px
+    }
+ #merchantLogoImg {
+      border: 1px solid #D3D5D8;
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      padding: 5px;
+    }
+
+    #merchantLogo {
+        padding-left: 17px;
+    }
+  #amount {
+    font-family: "Amazon Ember";
+    font-style: normal;
+    font-weight: 700;
+    font-size: 18px;
+    line-height: 24px;
+    text-align: right;
+    color: #232F3E;
+  }
+
+  #reportTransaction {
+      font-style: italic;
+      font-size:small;
+      text-algin:left;
+      padding-left:17px;
+     }
+
+
+   .paymentDetailsHeading {
+    font-size: 13px;
+    line-height: 20px;
+    color: #7B828B;
+    font-family: "Amazon Ember";
+    }
+  .paymentDetailsContent {
+     font-size: 13px;
+     line-height: 20px;
+     font-family: "Amazon Ember";
+     color: #232F3E;
+    }
+
+  #termsAndConditions {
+    font-size: 11px;
+  }
+
+  a#termsAndConditions:link, a.haloWidgetLink:link, a#yourTransactionsLink:=
+link {
+    text-decoration: none;
+    color: #0066c0;
+  }
+
+  a#termsAndConditions:visited, a.haloWidgetLink:visited, a#yourTransaction=
+sLink:visited {
+    text-decoration: none;
+    color: #0066c0;
+  }
+
+  a#termsAndConditions:hover, a.haloWidgetLink:hover, a#yourTransactionsLin=
+k:hover {
+    text-decoration: underline;
+    color: #c45500;
+  }
+
+  a#termsAndConditions:active, a.haloWidgetLink:active, a#yourTransactionsL=
+ink:active {
+    text-decoration: underline;
+    color: #c45500;
+  }
+
+ #tableBox {
+    border: 1px solid rgb(204, 204, 204);
+    border-radius: 5px 5px 5px 5px;
+    align:center;
+    cellpadding:0;
+    cellspacing:0;
+    bgcolor:#FFFFFF
+        }
+
+#tableTitleData1 {
+    color: rgb(17, 17, 17);
+    text-decoration: none solid rgb(17, 17, 17);
+    font-family: "Amazon Ember";
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 20px;
+    border-bottom: 1px solid rgb(225, 225, 225);
+    vertical-align:middle;
+    }
+
+#tableTitleData2 {
+    line-height: 20px;
+    text-align: right;
+    vertical-align:middle;
+    color: #008A00;
+    font-family: "Amazon Ember";
+    font-weight: 500;
+    font-size: 13px;
+    border-bottom: 1px solid rgb(225, 225, 225);
+    vertical-align:middle;
+            }
+    #tableTitleData5 {
+    font-family: "Amazon Ember";
+    font-style: normal;
+    font-weight: 400;
+    font-size: 14px;
+    line-height: 20px;
+    color: #7B828B;
+   }
+   #tableTitleData6 {
+    font-family: "Amazon Ember";
+    font-style: normal;
+    font-weight: 700;
+    font-size: 16px;
+    line-height: 24px;
+    color: #232F3E;
+   }
+#tableData {
+     height:21px !important;
+     vertical-align:middle !important;
+     font-family: "Amazon Ember" !important;
+     font-size: 13px !important;
+    }
+
+    #button3 {
+         border-radius:3px;
+         border-color:#adb1b8 #a2a6ac #8d9096;
+         border-style:solid;
+         border-width:1px;
+         display:inline-block;
+         padding:0;
+         text-align:center;
+         text-decoration:none!important;
+         vertical-align:middle;
+        background:#f4d078;
+        background:-webkit-linear-gradient(top,#f7dfa5,#f0c14b);
+        background: linear-gradient(180deg, #F6DEA2 0%, #F6DEA2 16.66%, #F2=
+CC6A 63.3%, #EEC254 100%) !important;
+        width:100%;
+        }
+#button1 {
+         border-radius:22.5px;
+         border-color:#adb1b8 #a2a6ac #8d9096;
+         border-style:solid;
+         border-width:1px;
+         display:inline-block;
+         padding:0;
+         text-align:center;
+         text-decoration:none!important;
+         vertical-align:middle;
+        background:#FFD852;
+        width:100%;
+        }
+     #button2 {
+         background:#D6DAE1;
+         border-radius:22.5px;
+         border-color:#adb1b8 #a2a6ac #8d9096;
+         border-style:solid;
+         border-width:1px;
+         display:inline-block;
+         padding:0;
+         text-align:center;
+         text-decoration:none!important;
+         vertical-align:middle;
+        width:100%;
+        }
+
+    #banner {
+    width: 100% !important;
+    border-radius: 5px 5px 5px 5px;
+    }
+
+    #banner img {
+    width: 327px !important;
+    height: 70px !important;
+    }
+
+    #haloWidget {
+          width: 326px;
+          height: 70px;
+        }
+
+    #haloWidget img{
+      width: 60px !important;
+      height: 46px !important;
+      }
+    #haloWidget_ellipse{
+        box-sizing: border-box;
+        position: absolute;
+        width: 48px;
+        height: 48px;
+        left: 16px;
+        top: 198px;
+        background: #FFFFFF;
+        border: 1px solid #D3D5D8;
+    }
+   #paymentDetails {
+      margin: 0px 17px 0px 17px !important;
+    }
+
+    #trustedAndSecurePaymentsText {
+    font-size:13px;
+    line-height:16px
+    }
+
+     #trustedAndSecurePayments img{
+        display:inline-block;
+        vertical-align:middle;
+    }
+
+  @media only screen and (min-device-width: 450px) {
+    #notification, #notificationTable, #greetingMessage {
+      width: 450px;
+      table-layout:fixed;
+    }
+    #paymentHighlights {
+    width: 443px !important;
+    }
+
+    #trustedAndSecurePaymentsText {
+    font-size:15px;
+    line-height:18px;
+    }
+
+    #trustedAndSecurePayments {
+    width:100%;
+    }
+
+    #trustedAndSecurePayments img{
+        display:inline-block;
+        vertical-align:middle;
+        padding-bottom:3px;
+    }
+
+    #gapRow1 {
+      height: 15px !important;
+    }
+
+    #aPayLogo {
+      padding: 0px 25px 0px 25px !important;
+    }
+
+    #banner {
+     padding: 0px 25px 0px 25px !important;
+    }
+
+    #greetings {
+      font-family: "Amazon Ember";
+      font-size: 19px;
+      line-height: 30px;
+      padding: 0px 25px 0px 25px !important;
+    }
+
+    #messageText {
+        padding: 0px 25px 0px 25px !important;
+        }
+
+    #gapRow4 {
+      height: 20px !important;
+    }
+
+   #paymentHighlightsHeading1, #paymentHighlightsHeading2 {
+      font-size: 15px ;
+    }
+
+    #paymentHighlightsHeading1 {
+      padding-left: 25px !important;
+    }
+
+    #paymentHighlightsHeading2 {
+      padding-right: 25px !important;
+    }
+   #HighlightsHeadingName, #HighlightsHeadingAmount {
+    color: #7B828B;
+    font-size: 14px;
+    line-height: 20px;
+    font-family: "Amazon Ember";
+    font-style: normal;
+  }
+
+  #HighlightsHeadingAmount {
+    padding-right: 10px;
+    text-align: right;
+  }
+
+    #gapRow5 {
+      height: 15px !important;
+    }
+    #gapRow6 {
+      height: 8px !important;
+    }
+   #bankName {
+      padding-left: 25px !important;
+      width: 129px
+    }
+
+
+  #reportTransaction {
+     padding-left: 25px !important;
+    }
+
+    #paymentDetails {
+      width: 400px !important;
+      margin: 0px 25px 0px 25px !important;
+    }
+
+    .paymentDetailsHeading {
+      font-size: 14px;
+       line-height: 20px;
+        font-family: "Amazon Ember";
+        color: #7B828B;
+    }
+
+    .paymentDetailsContent {
+        font-family: "Amazon Ember";
+        font-style: normal;
+        font-weight: 400;
+        font-size: 14px;
+        line-height: 20px;
+        color: #232F3E;
+    }
+.paymentDetailsContent1 {
+        font-family: "Amazon Ember";
+        font-style: normal;
+        font-weight: 400;
+        font-size: 14px;
+        line-height: 20px;
+        color: #008296;
+        overflow-wrap: break-word;
+    }
+    #qcimage{
+        position: absolute;
+        width: 78px;
+        height: 16px;
+        left: 182px;
+        top: 677px;
+    }
+    #banner {
+       width: 100% !important;
+       border-radius: 2px 2px 2px 2px;
+    }
+
+    #banner img {
+    width: 394px !important;
+    height: 80px !important;
+    }
+
+
+    #haloWidget {
+        width: 394px !important;
+        height: 80px;
+        padding: 0px 25px 0px 25px !important;
+    }
+
+
+     #haloWidget img{
+     width: 69px !important;
+     height: 56px !important;
+     }
+
+    #trustedAndSecurePayments {
+    width: 394px;
+     padding: 0px 22px 0px 22px !important;
+        }
+
+     #trustedAndSecurePayments img{
+        display:inline-block;
+        vertical-align:middle;
+    }
+    #gapRow15  {
+      height: 15px;
+    }
+
+    #summarytable {
+      padding: 0px 25px 0px 25px !important;
+    }
+    #summarytable2 {
+      padding: 0px 22px 0px 22px !important;
+    }
+
+    #tableBox{
+    width: 394px !important;
+    }
+        #tableTitleData1 {
+            font-size: 15px;
+            line-height:21px;
+            }
+
+        #tableTitleData2 {
+             font-size: 15px;
+             line-height:21px;
+            }
+
+        #tableData {
+             height:21px;
+             vertical-align:middle;
+             font-family: "Amazon Ember";
+             font-size: 13px;
+            }
+   #redirectiveButtons{
+    width: 398px !important;
+    }
+      #termsAndConditions {
+    font-size: 13px;
+  }
+  }
+</style>
+</head><body>
+    <div id=3D"notification" style=3D"font-family: Amazon Ember; background=
+-color: #FFFFFF; max-width:450px">
+    <table id=3D"notificationTable" width=3D"367px" style=3D"border: 1px so=
+lid #CCC; border-top: 5px solid #FFD852; table-layout:fixed; max-width:450p=
+x;">
+        <tr>
+            <td id=3D"topLogo" style=3D"background: #F4F4F5; height: 58px; =
+"><div> <a href=3D"https://nll1bq56.r.ap-south-1.awstrack.me/L0/https:%2F%2=
+Fwww.amazon.in%2Fgp%2Fsva%2Fdashboard/1/0109019ffab5d56f-ab681211-0c79-46d4=
+-8740-60e95e6f3269-000000/OGMdnNHEGqlH_p8Wyus-swogSbc=3D258"><img src=3D"ht=
+tps://m.media-amazon.com/images/G/31/Apay_Push_Automation/Tags/Apay_Squid.p=
+ng" height=3D"35"> </a>
+                                    </div>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td id=3D"gapRow2" style=3D"height:25px"></=
+td>
+                            </tr>
+                <tr>
+                    <td>
+                        <table id=3D"greetingMessage" width=3D"360px" cells=
+pacing=3D"0" cellpadding=3D"0" style=3D" table-layout:fixed;">
+                        <tr>
+                        <td id=3D"greetings" style=3D"margin: 0px 0px 0px 0=
+px; padding: 0px 17px 0px 17px; color: #232F3E;
+                        font-style: normal; font-weight: 400; font-size: 16=
+px; line-height: 20px;">Hi Vivek,</td>
+                        </tr>
+                        <tr>
+                            <td id=3D"gapRow3" style=3D"height: 5px"></td>
+                        </tr>
+                        <tr>
+                            <td id=3D"messageText" style=3D"margin: 0px 0px=
+ 0px 0px; padding: 0px 17px 0px 17px;  color: #232F3E;
+                             font-style: normal; font-weight: 700; font-siz=
+e: 18px; line-height: 24px;">Thank you for using Amazon Pay ICICI Bank Cred=
+it Card. We have added reward points basis your last month=E2=80=99s billin=
+g cycle to your Amazon Pay balance =E2=80=98Gifts and Credits=E2=80=99.</td=
+>
+                        </tr>
+                        </table>
+                    </td>
+                </tr>
+        <tr>
+            <td id=3D"gapRow3" style=3D"height: 20px"></td>
+        </tr>
+        <tr>
+            <td><!--[if mso]>
+            <table id=3D"paymentHighlights1" style=3D"height: 84px; padding=
+-left: 23px; margin: 0px 15px 0px 5px !important;">
+                <tr>
+                    <td id=3D"merchantLogo1" rowspan=3D"3" style =3D "width=
+: 40px; height: 40px; left: 20px; padding: 0px 5px 10px 15px !important">
+                        <div id =3D"merchantLogoImg" style =3D "border: 1px=
+ solid #D3D5D8; width: 48px; height: 48px; border-radius: 50%; padding-left=
+: 5px;">
+                        <img style=3D"text-align: center;margin-top:4px;mar=
+gin-left:4px" src=3D"https://m.media-amazon.com/images/G/31/HFC/gift_card_4=
+8x48.png" height=3D"40px" width=3D"40px">
+                        </div>
+                    </td>
+                    <td id=3D"HighlightsHeadingName1"   style=3D"color: #7B=
+828B;">Received</td>
+                    <td></td>
+                    <td></td>
+                    <td id=3D"HighlightsHeadingAmount1" style=3D"color: #7B=
+828B; padding-right: -2px; text-align:right"; width=3D"147px"; height=3D"10=
+px"; line-height=3D"14px">Amount</td>
+                </tr>
+                <tr>
+                    <td id=3D"MerchantName1" rowspan=3D"2" style=3D"font-st=
+yle:normal; font-weight:700; font-size:18px; color:#232F3E; width=3D114px; =
+height=3D48px; line-height=3D24px">Amazon Pay eGift Card</td>
+                    <td></td>
+                    <td></td>
+                    <td id=3D"amount1" style=3D"font-family: Amazon Ember; =
+width: 47px; height: 24px; right: 16px; font-style: normal; font-weight: 70=
+0; font-size: 18px; line-height: 24px; text-align: right; color: #232F3E; p=
+adding: 0px 0px 25px 0px !important;">=E2=82=B919.00</td>
+                </tr>
+            </table>
+        <![endif]-->
+
+        <!--[if !mso]> <!-->
+                <table id=3D"paymentHighlights1">
+                    <tr>
+                        <td id=3D"merchantLogo1" rowspan=3D"3" style =3D "w=
+idth: 40px; height: 40px; left: 20px; padding: 0px 5px 10px 15px !important=
+">
+                        <div id =3D"merchantLogoImg" style =3D "border: 1px=
+ solid #D3D5D8; width: 48px; height: 48px; border-radius: 50%; padding: 5px=
+;">
+                        <img style=3D"text-align: center;margin-top:4px;mar=
+gin-left:4px" src=3D"https://m.media-amazon.com/images/G/31/HFC/gift_card_4=
+8x48.png" height=3D"40px" width=3D"40px">
+                        </div>
+                        </td>
+                        <td id=3D"HighlightsHeadingName1" style=3D"color: #=
+7B828B; font-size: 14px;  font-weight: 400; line-height: 20px;
+                            font-style: normal;  height: 20px; left: 71px; =
+width: 56px;">Received</td>
+
+
+                       <td id=3D"HighlightsHeadingAmount1" style=3D"color: =
+#7B828B; padding-right: -2px; text-align:right"; width=3D"147px";
+                               height=3D"10px"; line-height=3D"14px">Amount=
+</td>
+                    </tr>
+
+                    <tr>
+                        <td id=3D"MerchantName1" style=3D"font-style: norma=
+l;font-weight: 700;font-size: 18px;color: #232F3E;"
+                        width=3D"115px" height=3D"48px" line-height=3D"24px=
+">Amazon Pay eGift Card</td>
+                        <td id=3D"amount1" style=3D"font-family: Amazon Emb=
+er; width: 47px; height: 24px; right: 16px; font-style: normal; font-weight=
+: 700; font-size: 18px;
+                                line-height: 24px; text-align: right; color=
+: #232F3E; padding: 0px 0px 25px 0px !important;">=E2=82=B919.00</td>
+                    </tr>
+                </table>
+             <!-- <![endif]-->
+            </td>
+        </tr>
+    <tr>
+    <td>
+        <table style=3D"table-layout:fixed;width:100%;">
+
+            <tr>
+                <td id=3D"gapRow6" style=3D"height: 6px; table-layout:fixed=
+; border-bottom: 1px solid rgb(225, 225, 225)" colspan=3D"2"></td>
+            </tr>
+        </table>
+    </td>
+    </tr>
+     <tr>
+        <td id=3D"gapRow5" style=3D"height: 15px"></td>
+    </tr>
+    <tr>
+    <td>
+            <table id=3D"paymentDetails" cellspacing=3D"10" width=3D"326px"=
+ style=3D"margin: 0px 17px 0px 17px; table-layout:fixed">
+            <tr>
+                <td class=3D"paymentDetailsHeading" style=3D" position: abs=
+olute; width: 145px; height: 20px; left: 26px;
+                    font-style: normal; font-weight: 400; font-size: 14px; =
+line-height: 20px; color: #7B828B;">Reference ID</td>
+                <td class=3D"paymentDetailsContent" style=3D" height: 20px;=
+ left: 182.14px; font-style: normal; font-weight: 400;
+                    font-size: 14px; line-height: 20px; color: #232F3E;">60=
+14887234093554</td>
+            </tr>
+            <tr>
+                <td class=3D"paymentDetailsHeading" style=3D" position: abs=
+olute; width: 145px; height: 20px; left: 26px;
+                    font-style: normal; font-weight: 400; font-size: 14px; =
+line-height: 20px; color: #7B828B;">Expiry date</td>
+                <td class=3D"paymentDetailsContent" style=3D" height: 20px;=
+ left: 182.14px; font-style: normal; font-weight: 400;
+                    font-size: 14px; line-height: 20px; color: #232F3E;">13=
+-Aug-2029</td>
+            </tr>
+            <tr>
+                <td class=3D"paymentDetailsHeading" style=3D" position: abs=
+olute; width: 145px; height: 20px; left: 26px;
+                    font-style: normal; font-weight: 400; font-size: 14px; =
+line-height: 20px; color: #7B828B;">Issued by</td>
+               <td class=3D"paymentDetailsContent" style=3D" height: 20px; =
+left: 182.14px; font-style: normal; font-weight: 400;
+                    font-size: 14px; line-height: 20px; color: #232F3E;">Pi=
+ne Labs Private Limited</td>
+            </tr>
+            </table>
+        </td>
+    </tr>
+
+
+    <tr>
+        <td id=3D"gapRow5" style=3D"height: 13px"></td>
+    </tr>
+    <tr>
+        <td style=3D"padding: 0px 22px 0px 22px !important;">
+        <div>
+<!--[if mso]>
+<center>
+<v:roundrect xmlns:v=3D"urn:schemas-microsoft-com:vml" xmlns:w=3D"urn:schem=
+as-microsoft-com:office:word"
+href=3D"https://www.amazon.in/gp/payment/statement" align=3D"center" style=
+=3D"height:55px;v-text-anchor:middle;width:300px;" arcsize=3D"50%" stroke=
+=3D"f" fillcolor=3D"#FFD852">
+    <w:anchorlock/>
+    <center style=3D"color:#111;font-family:Amazon Ember;font-size:16px;fon=
+t-weight:bold;">
+        View Statement
+    </center>
+</v:roundrect>
+</center>
+<![endif]-->
+<!--[if !mso]> <!-->
+  <table id=3D"redirectiveButtons" width=3D"330px" style=3D"table-layout:fi=
+xed">
+                <tbody><tr>
+                    <td>
+                        <div style=3D"width:100%" style=3D"text-align:cente=
+r; text-decoration:none;" >
+                            <span id=3D"button1" style=3D"border-radius:22.=
+5px; border-color:#adb1b8 #a2a6ac #8d9096;  border-width:1px; display:inlin=
+e-block; padding:0; text-align:center; text-decoration:none!important; vert=
+ical-align:middle; background:#FFD852; width:100%">
+                                <span style=3D" text-align:center; text-dec=
+oration:none;">
+                                    <span aria-hidden=3D"true" style=3D"bac=
+kground-color:transparent; border:0; display:block; font-size:18px; line-he=
+ight:48px; margin:0; outline:0; text-align:center; white-space:nowrap; colo=
+r:#111; text-decoration:none; font-weight:bold ">
+                                        <a href=3D"https://nll1bq56.r.ap-so=
+uth-1.awstrack.me/L0/https:%2F%2Fwww.amazon.in%2Fgp%2Fpayment%2Fstatement/1=
+/0109019ffab5d56f-ab681211-0c79-46d4-8740-60e95e6f3269-000000/aAdygBJ8HPQ1W=
+L4mDPmFaOqAeGE=3D258" style=3D"text-align:center; text-decoration:none; col=
+or:inherit;">View Statement</a>
+                                    </span>
+                                </span>
+                            </span>
+                        </div>
+                    </td>
+                </tr>
+                    <tr>
+                        <td id=3D"gapRow5" style=3D"height:3px"></td>
+                    </tr>
+                </tbody></table>
+<!-- <![endif]-->
+        </div>
+        </td>
+    </tr>
+    <tr><td>
+        <table width=3D"330px" style =3D "background-color: #F2F2F2; margin=
+: 0px 17px 0px 17px">
+                    <td style=3D"vertical-align: top">
+                        <img src=3D"https://m.media-amazon.com/images/G/31/=
+HFC/Info.png" height=3D"19px" width=3D"19px" style=3D"border-radius: 10px" =
+>
+                    </td>
+                    <td id=3D"gapType11" style=3D"width: 5px"></td>
+                    <td style =3D "font-size: 11px; line-height: 20px; colo=
+r: rgba(0,0,0,0.5);">
+                        These reward points can be used to shop on Amazon a=
+nd 100+ Amazon Pay partner merchants. <br/> For shopping on Amazon, Prime m=
+embers get unlimited 5% reward points and Non-Prime members get 3% reward p=
+oints. On paying bills at Amazon and using at 100+ Amazon Pay partner merch=
+ants, every transaction gives you 2% reward points. For all other transacti=
+ons, you get 1% reward points. What=E2=80=99s more, these points never expi=
+re! <br/> If you have any questions with regards to usage of this card, ple=
+ase visit <a href=3D"https://nll1bq56.r.ap-south-1.awstrack.me/L0/https:%2F=
+%2Fwww.amazon.in%2Fhelp%2F/1/0109019ffab5d56f-ab681211-0c79-46d4-8740-60e95=
+e6f3269-000000/4B1L2jBPs0oMA1gtnvC0DkSdbhQ=3D258">www.amazon.in/help</a>. C=
+ontinue shopping using Amazon Pay ICICI Credit Card and get rewarded on all=
+ your purchases.
+                    </td>
+                </table>
+    </td></tr>
+     <tr>
+        <td id=3D"gapRow5" style=3D"height: 5px"></td>
+    </tr>
+
+    <tr>
+        <td>
+            <table style=3D"table-layout:fixed;width:100%;">
+
+                <tr>
+                    <td id=3D"gapRow6" style=3D"height: 6px; table-layout:f=
+ixed; border-bottom: 1px solid rgb(225, 225, 225)" colspan=3D"2"></td>
+                </tr>
+            </table>
+        </td>
+    </tr>
+    <tr>
+        <td id=3D"gapRow5" style=3D"height: 15px"></td>
+    </tr>
+    <tr>
+    <td>
+        <table id=3D"tableTitleData5" width=3D"326px" style=3D"margin: 0px =
+17px 0px 17px; table-layout:fixed">
+            <tr>
+                <td id=3D"tableTitleData6" width=3D"100%" style=3D"font-sty=
+le: normal; font-weight: 700; font-size: 16px;
+                    line-height: 24px; color: #232F3E;">How to use the Gift=
+ Card balance?</td>
+            </tr>
+             <tr>
+                <td width=3D"100%" style=3D"height: 15px"></td>
+            </tr>
+            <tr>
+                <td id=3D"instructionContent" width=3D"100%" style=3D"font-=
+style: normal; font-weight: 400; font-size: 14px;
+                    line-height: 20px; color: #7B828B;">You can use your Am=
+azon Pay balance for subsequent purchases on <a href=3D"http://nll1bq56.r.a=
+p-south-1.awstrack.me/L0/www.amazon.in/1/0109019ffab5d56f-ab681211-0c79-46d=
+4-8740-60e95e6f3269-000000/G921BEsCXJNV-8kSz1eA5AofVCU=3D258">www.amazon.in=
+</a> till expiry.</td>
+            </tr>
+            <tr>
+                <td id=3D"instructionContent" width=3D"100%" style=3D"font-=
+style: normal; font-weight: 400; font-size: 14px;
+                    line-height: 20px; color: #7B828B;">If you have any que=
+stions please visit <a href=3D"http://nll1bq56.r.ap-south-1.awstrack.me/L0/=
+www.amazon.in%2Fhelp/1/0109019ffab5d56f-ab681211-0c79-46d4-8740-60e95e6f326=
+9-000000/ux0aRAR_wrWiStJLfV0KawsuJYc=3D258">www.amazon.in/help</a> to call =
+or e-mail us from the Customer Service box from the right side of the page.=
+</td>
+            </tr>
+            <tr>
+                <td id=3D"gapRow5" style=3D"height: 15px"></td>
+            </tr>
+            <tr>
+                <td id=3D"instructionContent" width=3D"100%" style=3D"font-=
+style: normal; font-weight: 400; font-size: 14px;
+                    line-height: 20px; color: #7B828B;">
+                <a href=3D"https://nll1bq56.r.ap-south-1.awstrack.me/L0/htt=
+ps:%2F%2Fwww.amazon.in%2Fgp%2Fhelp%2Fcustomer%2Fdisplay.html%3FnodeId=3DGNG=
+9PXYZUMQT72QK/1/0109019ffab5d56f-ab681211-0c79-46d4-8740-60e95e6f3269-00000=
+0/tI0XVWIjDwAdm0mevBBmxRUvdzY=3D258" style=3D"text-align:center; text-decor=
+ation:none;">
+                Terms and Conditions
+                </a>
+                </td>
+            </tr>
+        </table>
+    </td>
+</tr>
+
+    <tr>
+    <td>
+        <table style=3D"table-layout:fixed;width:100%;">
+
+            <tr>
+                <td id=3D"gapRow6" style=3D"height: 6px; table-layout:fixed=
+; border-bottom: 1px solid rgb(225, 225, 225)" colspan=3D"2"></td>
+            </tr>
+        </table>
+    </td>
+    </tr>
+<tr>
+    <td id=3D"gapRow5" style=3D"height: 15px"></td>
+</tr>
+
+    <tr>
+        <td id=3D"gapRow6" style=3D"height: 6px"></td>
+    </tr>
+    <tr>
+        <td id=3D"haloWidget" style=3D"padding: 0px 17px 0px 17px; text-ali=
+gn:center;">
+          <table  style=3D"table-layout:fixed;border: 1px solid #cccccc; bo=
+rder-radius: 5px 5px 5px 5px;width:100%" width=3D"326px">
+            <tr>
+                    <td style=3D"font-size: 12px;text-align: center;overflo=
+w-wrap: break-word;color:#232F3E">
+                        <a href=3D"http://nll1bq56.r.ap-south-1.awstrack.me=
+/L0/www.amazon.in%2Fhfc%2FmobileRecharge%3Fref_=3Demail_rewards_rech/1/0109=
+019ffab5d56f-ab681211-0c79-46d4-8740-60e95e6f3269-000000/A-Td8HOzixUKpzgYM6=
+sZkd58lEc=3D258" class=3D"haloWidgetLink">
+                            <img src=3D"https://m.media-amazon.com/images/G=
+/31/HFC/HFC_prepaid_icon.png" width=3D"60" height=3D"46">
+                        </a>
+                       Recharges
+                    </td>
+                    <td style=3D"font-size: 12px;text-align: center;color:#=
+232F3E">
+                        <a href=3D"http://nll1bq56.r.ap-south-1.awstrack.me=
+/L0/www.amazon.in%2Fhfc%2Fdth%3Fref_=3Demail_rewards_dth/1/0109019ffab5d56f=
+-ab681211-0c79-46d4-8740-60e95e6f3269-000000/jUapN4o2KIuCq98JkpbYaM9BV6A=3D=
+258" class=3D"haloWidgetLink">
+                            <img src=3D"https://m.media-amazon.com/images/G=
+/31/HFC/Icons_DTH-Recharge.png" width=3D"60" height=3D"46">
+                        </a>
+                        DTH
+                    </td>
+                    <td style=3D"font-size: 12px;text-align: center;color:#=
+232F3E">
+                        <a href=3D"http://nll1bq56.r.ap-south-1.awstrack.me=
+/L0/www.amazon.in%2Fb%3Fnode=3D15246428031%26ref_=3Demail_rewards_bill/1/01=
+09019ffab5d56f-ab681211-0c79-46d4-8740-60e95e6f3269-000000/I8d4xCNRrzjKnFTU=
+QZqRpOh_5wA=3D258" class=3D"haloWidgetLink">
+                            <img src=3D"https://m.media-amazon.com/images/G=
+/31/HFC/MOBILE_POSTPAID.png" width=3D"60" height=3D"46">
+                        </a>
+                        Bills
+                    </td>
+                    <td style=3D"font-size: 12px;text-align: center;color:#=
+232F3E">
+                        <a href=3D"http://nll1bq56.r.ap-south-1.awstrack.me=
+/L0/www.amazon.in%2Fb%2F%3Fnode=3D21102071031%26ref_=3Demail_rewards_oflp/1=
+/0109019ffab5d56f-ab681211-0c79-46d4-8740-60e95e6f3269-000000/Byp7fgY8L8NJJ=
+sTgIUekoMYymzo=3D258" class=3D"haloWidgetLink">
+                            <img src=3D"https://m.media-amazon.com/images/G=
+/31/Apay_Push_Automation/Tags/Reward_Icon.png" width=3D"60" height=3D"46">
+                        </a>
+                        Rewards
+                    </td>
+                    <td style=3D"font-size: 12px;text-align: center;color:#=
+232F3E">
+                        <a href=3D"http://nll1bq56.r.ap-south-1.awstrack.me=
+/L0/www.amazon.in%2Famazonpay%2Fhome%3Fref_=3Demail_rewards_dasp/1/0109019f=
+fab5d56f-ab681211-0c79-46d4-8740-60e95e6f3269-000000/zXFjWgA7-skUQPqMXE-Mmm=
+kX8_g=3D258" class=3D"haloWidgetLink">
+                            <img src=3D"https://m.media-amazon.com/images/G=
+/31/HFC/More_icon_48x48.png" width=3D"60" height=3D"46">
+                        </a>
+                        More
+                    </td>
+                 </tr>
+          </table>
+        </td>
+    </tr>
+      <tr>
+        <td id=3D"gapRow6" style=3D"height: 6px"/>
+      </tr>
+      <tr>
+        <td id=3D"trustedAndSecurePayments" width=3D"326px" style=3D"paddin=
+g: 0px 15px 0px 15px; text-align:center;">
+          <table style=3D"table-layout:fixed;width:100%;">
+            <tr>
+              <td style=3D"background-color:#f2f2f2;vertical-align:middle;t=
+ext-align:center;height:44px;border-radius:8px" width=3D"326px">
+                <img src=3D"https://m.media-amazon.com/images/G/31/gc/templ=
+ates/TrustedAndSecurePayments_Icon.png"
+                style=3D"text-align:center; display:inline-block;vertical-a=
+lign:middle;padding-bottom:3px"
+                height=3D"40" width=3D"235">
+              </td>
+            </tr>
+          </table>
+          </td>
+         </tr>
+
+                </td>
+              </tr>
+        <tr>
+        <td id=3D"gapRow6" style=3D"height: 6px">
+      </td></tr>
+    </table>
+=09=09=09</div><img alt=3D"" src=3D"https://nll1bq56.r.ap-south-1.awstrack.=
+me/I0/0109019ffab5d56f-ab681211-0c79-46d4-8740-60e95e6f3269-000000/p8k6L1AC=
+j-LBgTFqNKC48tnE3G8=3D258" style=3D"display: none; width: 1px; height: 1px;=
+">
+</body>
+=09=09=09</html>
+------=_Part_948805_940201501.1786617648495--

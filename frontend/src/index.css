@@ -1,0 +1,173 @@
+@import "tailwindcss";
+
+/*
+ * One token set, two products, three theme states.
+ *
+ * @theme carries the LIGHT palette, which makes every token available both as
+ * a Tailwind utility (bg-surface) and as arbitrary syntax (bg-[var(--color-surface)]).
+ * Money was already written against these variable names; Mail was converted to
+ * them during the merge, so neither product hardcodes a slate/violet scale.
+ *
+ * Theme resolution:
+ *   :root                      -> light (the @theme block below)
+ *   [data-theme="dark"]        -> dark, explicit user choice
+ *   prefers-color-scheme: dark -> dark, unless the user explicitly chose light
+ *
+ * Never declare a colour only inside a media or [data-theme] block; the
+ * un-stamped "system" state would have no value for it.
+ */
+
+@theme {
+  --color-bg: #f4f5f8;
+  --color-surface: #ffffff;
+  --color-surface-2: #eceff4;
+  --color-border: #e2e5ec;
+  --color-border-strong: #c7cdd9;
+
+  --color-text: #14161f;
+  --color-text-muted: #5c6273;
+  --color-text-subtle: #858c9c;
+
+  --color-accent: #6d4aef;
+  --color-accent-2: #5b3ad6;
+  --color-accent-hover: #5b3ad6;
+  --color-accent-tint: #ede9fe;
+
+  --color-positive: #0f8a4d;
+  --color-positive-tint: #ddf3e6;
+  --color-negative: #cc3333;
+  --color-negative-tint: #fbe6e6;
+
+  /* Neutral wash for row/nav hover. Dark themes want a white veil, light
+     themes a dark one, so this cannot be a fixed rgba in the components. */
+  --color-hover: rgba(20, 22, 31, 0.045);
+
+  /* Stat-tile accents. Foreground is the icon, -bg is the plate behind it. */
+  --color-tint-violet: #6d4aef;
+  --color-tint-violet-bg: #ece7fd;
+  --color-tint-green: #0f8a4d;
+  --color-tint-green-bg: #ddf3e6;
+  --color-tint-orange: #c25610;
+  --color-tint-orange-bg: #fcebdd;
+  --color-tint-cyan: #0e7c8a;
+  --color-tint-cyan-bg: #d9f0f3;
+  --color-tint-pink: #bd3f76;
+  --color-tint-pink-bg: #fbe5ef;
+}
+
+/* Explicit dark choice wins over any OS setting. */
+:root[data-theme="dark"] {
+  --color-bg: #0b0c10;
+  --color-surface: #14151c;
+  --color-surface-2: #191a22;
+  --color-border: #262832;
+  --color-border-strong: #363945;
+
+  --color-text: #e5e7eb;
+  --color-text-muted: #8b8d98;
+  --color-text-subtle: #6b6d78;
+
+  --color-accent: #8b5cf6;
+  --color-accent-2: #a78bfa;
+  --color-accent-hover: #7c4df0;
+  --color-accent-tint: #241d3d;
+
+  --color-positive: #22c55e;
+  --color-positive-tint: #10301f;
+  --color-negative: #ef4444;
+  --color-negative-tint: #331616;
+
+  --color-hover: rgba(255, 255, 255, 0.05);
+
+  --color-tint-violet: #a78bfa;
+  --color-tint-violet-bg: rgba(139, 92, 246, 0.15);
+  --color-tint-green: #34d399;
+  --color-tint-green-bg: rgba(16, 185, 129, 0.15);
+  --color-tint-orange: #fb923c;
+  --color-tint-orange-bg: rgba(249, 115, 22, 0.15);
+  --color-tint-cyan: #22d3ee;
+  --color-tint-cyan-bg: rgba(6, 182, 212, 0.15);
+  --color-tint-pink: #f472b6;
+  --color-tint-pink-bg: rgba(236, 72, 153, 0.15);
+
+  color-scheme: dark;
+}
+
+/* System dark, for everyone who never touched the toggle. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-bg: #0b0c10;
+    --color-surface: #14151c;
+    --color-surface-2: #191a22;
+    --color-border: #262832;
+    --color-border-strong: #363945;
+
+    --color-text: #e5e7eb;
+    --color-text-muted: #8b8d98;
+    --color-text-subtle: #6b6d78;
+
+    --color-accent: #8b5cf6;
+    --color-accent-2: #a78bfa;
+    --color-accent-hover: #7c4df0;
+    --color-accent-tint: #241d3d;
+
+    --color-positive: #22c55e;
+    --color-positive-tint: #10301f;
+    --color-negative: #ef4444;
+    --color-negative-tint: #331616;
+
+    --color-hover: rgba(255, 255, 255, 0.05);
+
+    --color-tint-violet: #a78bfa;
+    --color-tint-violet-bg: rgba(139, 92, 246, 0.15);
+    --color-tint-green: #34d399;
+    --color-tint-green-bg: rgba(16, 185, 129, 0.15);
+    --color-tint-orange: #fb923c;
+    --color-tint-orange-bg: rgba(249, 115, 22, 0.15);
+    --color-tint-cyan: #22d3ee;
+    --color-tint-cyan-bg: rgba(6, 182, 212, 0.15);
+    --color-tint-pink: #f472b6;
+    --color-tint-pink-bg: rgba(236, 72, 153, 0.15);
+
+    color-scheme: dark;
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,24 @@
+services:
+  backend:
+    build: ./backend
+    environment:
+      - WOLLOW_MASTER_KEY=${WOLLOW_MASTER_KEY}
+      - WOLLOW_ADMIN_PASSWORD=${WOLLOW_ADMIN_PASSWORD}
+      - WOLLOW_JWT_SECRET=${WOLLOW_JWT_SECRET}
+      - WOLLOW_COOKIE_SECURE=${WOLLOW_COOKIE_SECURE:-false}
+      - WOLLOW_CLASSIFY_CONCURRENCY=${WOLLOW_CLASSIFY_CONCURRENCY:-3}
+    volumes:
+      - wollow-data:/data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "${WOLLOW_PORT:-8081}:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  wollow-data:
