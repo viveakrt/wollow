@@ -1,3 +1,4 @@
+
 import { Link } from 'react-router-dom'
 import { ArrowUpRight, Receipt, ArrowLeftRight, HelpCircle } from 'lucide-react'
 import type { MoneyLink } from '../types'
@@ -83,9 +84,8 @@ function ChipLink({
     <Link
       to={to}
       onClick={(e) => e.stopPropagation()}
-      className={`inline-flex items-center gap-1.5 rounded-full font-medium transition-opacity hover:opacity-80 ${toneClass} ${
-        compact ? 'px-2 py-0.5 text-[11px]' : 'px-2.5 py-1 text-xs'
-      }`}
+      className={`inline-flex items-center gap-1.5 rounded-full font-medium transition-opacity hover:opacity-80 ${toneClass} ${compact ? 'px-2 py-0.5 text-[11px]' : 'px-2.5 py-1 text-xs'
+        }`}
     >
       {icon}
       {children}

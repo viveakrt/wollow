@@ -3,6 +3,7 @@ package moneyapi
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -422,5 +423,119 @@ func TestForeignHoldingWithoutARateIsExcludedAndNamed(t *testing.T) {
 	}
 	if len(summary.UnconvertedCurrencies) != 1 || summary.UnconvertedCurrencies[0] != "USD" {
 		t.Errorf("unconverted = %v, want [USD] so the gap is visible", summary.UnconvertedCurrencies)
+	}
+}
+
+// A holding with no trades is a free-standing figure: editing units/invested/
+// current value must simply work, the way it always has.
+func TestEditingAManualHoldingChangesItsNumbers(t *testing.T) {
+	_, mux := newTestServer(t)
+	created := decode[models.Investment](t, do(t, mux, "POST", "/api/money/investments",
+		`{"name":"HDFC FD","kind":"fd","investedAmount":10000,"currentValue":10000}`))
+
+	updated := decode[models.Investment](t, do(t, mux, "PUT",
+		fmt.Sprintf("/api/money/investments/%d", created.ID),
+		`{"name":"HDFC FD","kind":"fd","investedAmount":15000,"currentValue":15500,"interestRate":7.5}`))
+
+	if updated.InvestedAmount != 15000 || updated.CurrentValue != 15500 {
+		t.Errorf("invested=%.2f value=%.2f, want 15000/15500 — a manual holding's figures should edit freely",
+			updated.InvestedAmount, updated.CurrentValue)
+	}
+	if updated.HasTrades {
+		t.Error("hasTrades = true for a holding with no trades")
+	}
+}
+
+// The bug this whole design exists to prevent: a trade-backed holding's
+// units/invested/current value must NOT be settable by PUT, because the very
+// next trade or price update recomputes them from investment_trades and
+// silently discards whatever the client sent — an edit that "works" today and
+// vanishes without explanation next month.
+func TestEditingATradeBackedHoldingIgnoresFigureFields(t *testing.T) {
+	server, mux := newTestServer(t)
+	server.DB.Exec(`INSERT INTO investments (id, kind, institution, name, identifier, currency,
+		invested_amount, current_value, units, status, source)
+		VALUES (1, 'stock', 'Zerodha', 'TATA MOTORS', 'INE155A01022', 'INR', 1992, 1992, 6, 'active', 'email')`)
+	server.DB.Exec(`INSERT INTO investment_trades (investment_id, side, shares, price, amount, currency, trade_date, source)
+		VALUES (1, 'buy', 6, 332, 1992, 'INR', '2026-08-14', 'email')`)
+
+	// The client sends wildly different figures — as it would if it pre-filled
+	// a form from a stale read and the user typed over them.
+	updated := decode[models.Investment](t, do(t, mux, "PUT", "/api/money/investments/1",
+		`{"name":"Tata Motors","kind":"stock","investedAmount":99999,"currentValue":99999,"units":999,"notes":"corrected label"}`))
+
+	if updated.InvestedAmount != 1992 || updated.CurrentValue != 1992 || updated.Units == nil || *updated.Units != 6 {
+		t.Errorf("invested=%.2f value=%.2f units=%v — trade-derived figures must survive a PUT unchanged",
+			updated.InvestedAmount, updated.CurrentValue, updated.Units)
+	}
+	// Metadata still goes through.
+	if updated.Name != "Tata Motors" || updated.Notes != "corrected label" {
+		t.Errorf("name=%q notes=%q — metadata edits should still apply", updated.Name, updated.Notes)
+	}
+	if !updated.HasTrades {
+		t.Error("hasTrades = false for a holding with a trade on it")
+	}
+}
+
+// Adding, editing and deleting trades is the actual lever for correcting a
+// trade-backed holding's numbers — this exercises all three and confirms the
+// holding re-derives after each.
+func TestTradeCRUDRecomputesTheHoldingEachTime(t *testing.T) {
+	server, mux := newTestServer(t)
+	server.DB.Exec(`INSERT INTO investments (id, kind, institution, name, identifier, currency, status, source)
+		VALUES (1, 'stock', 'Zerodha', 'TATA MOTORS', 'INE155A01022', 'INR', 'active', 'email')`)
+
+	// Add: a real cost the user knows, correcting an approximated seed.
+	added := decode[models.Investment](t, do(t, mux, "POST", "/api/money/investments/1/trades",
+		`{"side":"buy","shares":6,"price":300,"tradeDate":"2026-01-01"}`))
+	if added.Units == nil || *added.Units != 6 || added.InvestedAmount != 1800 {
+		t.Fatalf("after add: units=%v invested=%.2f, want 6/1800", added.Units, added.InvestedAmount)
+	}
+
+	trades := decode[[]models.InvestmentTrade](t, do(t, mux, "GET", "/api/money/investments/1/trades", ""))
+	if len(trades) != 1 {
+		t.Fatalf("got %d trades, want 1", len(trades))
+	}
+	tradeID := trades[0].ID
+
+	// Update: correct the price.
+	updated := decode[models.Investment](t, do(t, mux, "PUT",
+		fmt.Sprintf("/api/money/investments/1/trades/%d", tradeID),
+		`{"side":"buy","shares":6,"price":332,"tradeDate":"2026-01-01"}`))
+	if updated.InvestedAmount != 1992 {
+		t.Errorf("after update: invested=%.2f, want 1992 (6 * 332)", updated.InvestedAmount)
+	}
+
+	// Delete: the position empties out rather than the holding being force-removed.
+	deleted := decode[models.Investment](t, do(t, mux, "DELETE",
+		fmt.Sprintf("/api/money/investments/1/trades/%d", tradeID), ""))
+	if deleted.InvestedAmount != 0 || deleted.Units == nil || *deleted.Units != 0 {
+		t.Errorf("after delete: invested=%.2f units=%v, want 0/0", deleted.InvestedAmount, deleted.Units)
+	}
+	if deleted.HasTrades {
+		t.Error("hasTrades = true after its only trade was deleted")
+	}
+}
+
+// A trade belongs to exactly the holding it was created on — editing or
+// deleting it through a DIFFERENT holding's id must be refused, not silently
+// mutate the wrong position.
+func TestTradeMutationIsScopedToItsOwnHolding(t *testing.T) {
+	server, mux := newTestServer(t)
+	server.DB.Exec(`INSERT INTO investments (id, kind, institution, name, currency, status, source)
+		VALUES (1, 'stock', 'Zerodha', 'A', 'INR', 'active', 'email'),
+		       (2, 'stock', 'Zerodha', 'B', 'INR', 'active', 'email')`)
+	server.DB.Exec(`INSERT INTO investment_trades (id, investment_id, side, shares, price, amount, currency, trade_date, source)
+		VALUES (1, 1, 'buy', 1, 100, 100, 'INR', '2026-01-01', 'email')`)
+
+	w := do(t, mux, "PUT", "/api/money/investments/2/trades/1",
+		`{"side":"buy","shares":1,"price":200,"tradeDate":"2026-01-01"}`)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("editing trade 1 via holding 2 = %d, want 404", w.Code)
+	}
+	var price float64
+	server.DB.QueryRow(`SELECT price FROM investment_trades WHERE id = 1`).Scan(&price)
+	if price != 100 {
+		t.Errorf("trade 1's price = %v, want it untouched at 100", price)
 	}
 }

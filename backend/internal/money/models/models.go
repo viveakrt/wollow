@@ -54,7 +54,13 @@ type Investment struct {
 	// Priced says whether CurrentValue reflects a real price or is just the
 	// cost standing in for one. Without it, an unpriced holding's zero gain
 	// looks like a measurement rather than an absence.
-	Priced       bool   `json:"priced"`
+	Priced bool `json:"priced"`
+	// HasTrades says whether Units/InvestedAmount/CurrentValue are DERIVED
+	// from investment_trades rather than free-standing numbers. Editing them
+	// directly on a holding where this is true would only last until the next
+	// trade or price update recomputes the position and silently discards the
+	// edit — the client should offer editing the trades themselves instead.
+	HasTrades    bool   `json:"hasTrades"`
 	StartDate    string `json:"startDate"`
 	MaturityDate string `json:"maturityDate"`
 	Status       string `json:"status"`

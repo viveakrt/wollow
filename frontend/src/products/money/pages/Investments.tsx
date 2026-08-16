@@ -11,13 +11,16 @@ import {
   Upload,
   Wallet,
   Tag,
+  Pencil,
+  Check,
+  X,
 } from 'lucide-react'
 import { api } from '../api'
 import { formatINR, formatMoney, formatDate } from '../lib/format'
 import { Card } from '../components/Card'
 import { StatTile } from '../components/StatTile'
 import { INVESTMENT_KIND_LABELS, INVESTMENT_TABS } from '../types'
-import type { Investment } from '../types'
+import type { Investment, InvestmentTrade, TradeInput } from '../types'
 
 /** Kinds whose holdings are priced per unit rather than by maturity. */
 const SECURITY_KINDS = new Set(['us_stock', 'stock', 'mutual_fund'])
@@ -27,7 +30,7 @@ export function Investments() {
   const [showClosed, setShowClosed] = useState(false)
   const [adding, setAdding] = useState(false)
   const [tab, setTab] = useState('all')
-  const [pricing, setPricing] = useState<Investment | null>(null)
+  const [editing, setEditing] = useState<Investment | null>(null)
 
   const status = showClosed ? 'all' : 'active'
 
@@ -265,7 +268,7 @@ export function Investments() {
                       <td className="py-2.5 pr-3 text-right">
                         <button
                           type="button"
-                          onClick={() => setPricing(inv)}
+                          onClick={() => setEditing(inv)}
                           title={
                             inv.priced
                               ? `Priced ${inv.lastPriceAt || 'recently'} — click to update`
@@ -327,18 +330,28 @@ export function Investments() {
                       </td>
                     )}
                     <td className="py-2.5">
-                      <button
-                        type="button"
-                        title="Delete holding"
-                        onClick={() => {
-                          if (confirm(`Delete "${inv.name}"? This cannot be undone.`)) {
-                            deleteMutation.mutate(inv.id)
-                          }
-                        }}
-                        className="text-[var(--color-text-subtle)] transition-colors hover:text-[var(--color-negative)]"
-                      >
-                        <Trash2 size={15} />
-                      </button>
+                      <div className="flex items-center justify-end gap-1">
+                        <button
+                          type="button"
+                          title="Edit holding"
+                          onClick={() => setEditing(inv)}
+                          className="p-1 text-[var(--color-text-subtle)] transition-colors hover:text-[var(--color-text)]"
+                        >
+                          <Pencil size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          title="Delete holding"
+                          onClick={() => {
+                            if (confirm(`Delete "${inv.name}"? This cannot be undone.`)) {
+                              deleteMutation.mutate(inv.id)
+                            }
+                          }}
+                          className="p-1 text-[var(--color-text-subtle)] transition-colors hover:text-[var(--color-negative)]"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -348,12 +361,15 @@ export function Investments() {
         </Card>
       )}
 
-      {pricing && (
-        <PriceHoldingModal
-          holding={pricing}
-          onClose={() => setPricing(null)}
-          onSaved={() => {
-            setPricing(null)
+      {editing && (
+        <EditHoldingModal
+          holding={editing}
+          onClose={() => setEditing(null)}
+          onSaved={(updated) => {
+            // Keep the modal open on save (trade edits are a sequence of
+            // small actions, not a single form submit) but stay in sync with
+            // what the server actually derived.
+            setEditing(updated)
             refresh()
           }}
         />
@@ -437,117 +453,500 @@ function FXNote({ currency, value }: { currency: string; value: number }) {
 }
 
 /**
- * Set a holding's current price, alongside the orders that built it.
+ * Edit everything about one holding: its descriptive fields always, its
+ * price and orders when it's trade-backed, or its raw figures directly when
+ * it isn't.
  *
- * Prices are typed in rather than fetched: there is no market data feed here,
- * and a made-up number would be worse than an admitted gap. The trade list is
- * shown because the average cost the gain is measured against is a claim, and
- * these are the trades it rests on.
+ * The split matters and isn't cosmetic. A trade-backed holding's units,
+ * invested amount and current value are DERIVED (see ledger.RecomputeHolding
+ * server-side) — the server ignores those three fields on a PUT for such a
+ * holding, so offering them as free-standing inputs here would show an edit
+ * "succeeding" and then silently reverting the next time any trade or price
+ * update recomputes the position. The correct lever for those holdings is the
+ * trade list below: add the purchase the mail parser missed, correct a
+ * demat-statement's approximated opening cost, or remove a trade entirely.
  */
-function PriceHoldingModal({
+function EditHoldingModal({
   holding,
   onClose,
   onSaved,
 }: {
   holding: Investment
   onClose: () => void
-  onSaved: () => void
+  onSaved: (updated: Investment) => void
 }) {
+  const queryClient = useQueryClient()
+  const isSecurity = SECURITY_KINDS.has(holding.kind)
+
+  const [meta, setMeta] = useState({
+    name: holding.name,
+    institution: holding.institution,
+    kind: holding.kind,
+    notes: holding.notes,
+    interestRate: holding.interestRate != null ? String(holding.interestRate) : '',
+    maturityDate: holding.maturityDate,
+    investedAmount: String(holding.investedAmount),
+    currentValue: String(holding.currentValue),
+    units: holding.units != null ? String(holding.units) : '',
+  })
   const [price, setPrice] = useState(holding.lastPrice != null ? String(holding.lastPrice) : '')
   const [error, setError] = useState<string | null>(null)
 
   const trades = useQuery({
     queryKey: ['money', 'investments', holding.id, 'trades'],
     queryFn: () => api.investments.trades(holding.id),
+    enabled: holding.hasTrades,
   })
 
-  const save = useMutation({
+  function afterMutate(updated: Investment) {
+    queryClient.invalidateQueries({ queryKey: ['money', 'investments', holding.id, 'trades'] })
+    setError(null)
+    onSaved(updated)
+  }
+
+  const saveMeta = useMutation({
+    mutationFn: () =>
+      api.investments.update(holding.id, {
+        name: meta.name.trim(),
+        institution: meta.institution.trim(),
+        kind: meta.kind,
+        notes: meta.notes,
+        interestRate: meta.interestRate ? Number(meta.interestRate) : undefined,
+        maturityDate: meta.maturityDate,
+        // Only take effect server-side when the holding has no trades; sent
+        // regardless so the manual-holding path (below) has somewhere to go.
+        investedAmount: Number(meta.investedAmount) || 0,
+        currentValue: Number(meta.currentValue) || 0,
+        units: meta.units ? Number(meta.units) : undefined,
+      }),
+    onSuccess: afterMutate,
+    onError: (e) => setError(e instanceof Error ? e.message : 'Could not save'),
+  })
+
+  const savePrice = useMutation({
     mutationFn: () => api.investments.setPrice(holding.id, Number(price)),
-    onSuccess: onSaved,
+    onSuccess: afterMutate,
     onError: (e) => setError(e instanceof Error ? e.message : 'Could not save the price'),
   })
 
+  const deleteTrade = useMutation({
+    mutationFn: (tradeId: number) => api.investments.deleteTrade(holding.id, tradeId),
+    onSuccess: afterMutate,
+  })
+  const updateTrade = useMutation({
+    mutationFn: ({ tradeId, data }: { tradeId: number; data: TradeInput }) =>
+      api.investments.updateTrade(holding.id, tradeId, data),
+    onSuccess: afterMutate,
+  })
+  const addTrade = useMutation({
+    mutationFn: (data: TradeInput) => api.investments.addTrade(holding.id, data),
+    onSuccess: afterMutate,
+  })
+
   const units = holding.units ?? 0
-  const preview = Number(price) > 0 && units > 0 ? Number(price) * units : null
+  const pricePreview = Number(price) > 0 && units > 0 ? Number(price) * units : null
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
       <div
-        className="w-full max-w-lg rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-6"
+        className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-6"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 className="text-lg font-semibold">{holding.name}</h2>
-        <p className="mt-1 text-sm text-[var(--color-text-muted)]">
-          {[holding.institution, INVESTMENT_KIND_LABELS[holding.kind] ?? holding.kind]
-            .filter(Boolean)
-            .join(' · ')}
-          {units > 0 && ` · ${Number(units.toFixed(4))} units`}
-        </p>
-
-        <div className="mt-4">
-          <label className="mb-1 block text-xs font-medium text-[var(--color-text-muted)]">
-            Price per unit ({holding.currency})
-          </label>
-          <input
-            type="number"
-            step="0.0001"
-            value={price}
-            autoFocus
-            onChange={(e) => setPrice(e.target.value)}
-            className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm focus:border-[var(--color-accent)] focus:outline-none"
-          />
-          {preview != null && (
-            <p className="mt-1.5 text-xs text-[var(--color-text-muted)]">
-              Values this holding at {formatMoney(preview, holding.currency)} against{' '}
-              {formatMoney(holding.investedAmount, holding.currency)} invested.
-            </p>
-          )}
-          {error && <p className="mt-1.5 text-xs text-[var(--color-negative)]">{error}</p>}
+        <div className="flex items-start justify-between gap-3">
+          <h2 className="text-lg font-semibold">Edit holding</h2>
+          <button onClick={onClose} className="text-[var(--color-text-subtle)] hover:text-[var(--color-text)]">
+            <X size={18} />
+          </button>
         </div>
 
-        <div className="mt-5">
-          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-[var(--color-text-subtle)]">
-            Orders
-          </div>
-          {trades.isPending ? (
-            <p className="text-sm text-[var(--color-text-muted)]">Loading…</p>
-          ) : (trades.data ?? []).length === 0 ? (
-            <p className="text-sm text-[var(--color-text-muted)]">
-              No orders recorded — this holding was entered by hand.
-            </p>
-          ) : (
-            <div className="max-h-44 space-y-1.5 overflow-y-auto pr-1">
-              {(trades.data ?? []).map((tr) => (
-                <div key={tr.id} className="flex items-center justify-between text-sm">
-                  <span className="text-[var(--color-text-muted)]">
-                    {tr.side === 'buy' ? 'Bought' : 'Sold'} {Number(tr.shares.toFixed(4))} @{' '}
-                    {formatMoney(tr.price, tr.currency)}
-                  </span>
-                  <span className="text-xs text-[var(--color-text-muted)]">
-                    {formatDate(tr.tradeDate) || tr.tradeDate}
-                  </span>
-                </div>
+        {error && <p className="mt-3 text-sm text-[var(--color-negative)]">{error}</p>}
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <Labelled label="Name">
+            <input
+              value={meta.name}
+              onChange={(e) => setMeta((m) => ({ ...m, name: e.target.value }))}
+              className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm"
+            />
+          </Labelled>
+          <Labelled label="Institution">
+            <input
+              value={meta.institution}
+              onChange={(e) => setMeta((m) => ({ ...m, institution: e.target.value }))}
+              className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm"
+            />
+          </Labelled>
+          <Labelled label="Type">
+            <select
+              value={meta.kind}
+              onChange={(e) => setMeta((m) => ({ ...m, kind: e.target.value }))}
+              className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm"
+            >
+              {KIND_OPTIONS.map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
               ))}
-            </div>
+            </select>
+          </Labelled>
+          {!isSecurity && (
+            <Labelled label="Interest rate %">
+              <input
+                type="number"
+                inputMode="decimal"
+                value={meta.interestRate}
+                onChange={(e) => setMeta((m) => ({ ...m, interestRate: e.target.value }))}
+                className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm"
+              />
+            </Labelled>
+          )}
+          {!isSecurity && (
+            <Labelled label="Maturity date">
+              <input
+                type="date"
+                value={meta.maturityDate}
+                onChange={(e) => setMeta((m) => ({ ...m, maturityDate: e.target.value }))}
+                className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm"
+              />
+            </Labelled>
           )}
         </div>
+
+        {holding.hasTrades ? (
+          <>
+            {/* Units/invested/value are derived — see the component doc
+                comment — so they're shown, not edited, here. */}
+            <div className="mt-4 flex items-center gap-4 rounded-lg bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-text-muted)]">
+              <span>
+                {units ? Number(units.toFixed(4)) : 0} units · {formatMoney(holding.investedAmount, holding.currency)}{' '}
+                invested
+              </span>
+              <span className="text-[var(--color-text-subtle)]">
+                — derived from the trades below, not editable directly
+              </span>
+            </div>
+
+            <div className="mt-4">
+              <label className="mb-1 block text-xs font-medium text-[var(--color-text-muted)]">
+                Price per unit ({holding.currency})
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  step="0.0001"
+                  value={price}
+                  onChange={(e) => setPrice(e.target.value)}
+                  className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm focus:border-[var(--color-accent)] focus:outline-none"
+                />
+                <button
+                  onClick={() => savePrice.mutate()}
+                  disabled={savePrice.isPending || !(Number(price) > 0)}
+                  className="shrink-0 rounded-lg border border-[var(--color-border-strong)] px-3 py-2 text-sm font-medium hover:bg-[var(--color-hover)] disabled:opacity-50"
+                >
+                  Set price
+                </button>
+              </div>
+              {pricePreview != null && (
+                <p className="mt-1.5 text-xs text-[var(--color-text-muted)]">
+                  Values this holding at {formatMoney(pricePreview, holding.currency)}.
+                </p>
+              )}
+            </div>
+
+            <div className="mt-5">
+              <div className="mb-2 text-xs font-medium uppercase tracking-wide text-[var(--color-text-subtle)]">
+                Orders
+              </div>
+              {trades.isPending ? (
+                <p className="text-sm text-[var(--color-text-muted)]">Loading…</p>
+              ) : (
+                <div className="max-h-56 space-y-1 overflow-y-auto pr-1">
+                  {(trades.data ?? []).map((tr) => (
+                    <TradeRow
+                      key={tr.id}
+                      trade={tr}
+                      onSave={(data) => updateTrade.mutate({ tradeId: tr.id, data })}
+                      onDelete={() => {
+                        if (confirm('Remove this order? The holding will be recomputed without it.')) {
+                          deleteTrade.mutate(tr.id)
+                        }
+                      }}
+                      busy={
+                        (updateTrade.isPending && updateTrade.variables?.tradeId === tr.id) ||
+                        (deleteTrade.isPending && deleteTrade.variables === tr.id)
+                      }
+                    />
+                  ))}
+                  {(trades.data ?? []).length === 0 && (
+                    <p className="text-sm text-[var(--color-text-muted)]">No orders yet.</p>
+                  )}
+                </div>
+              )}
+              <AddTradeForm
+                currency={holding.currency}
+                onAdd={(data) => addTrade.mutate(data)}
+                busy={addTrade.isPending}
+              />
+            </div>
+          </>
+        ) : (
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <Labelled label="Invested">
+              <input
+                type="number"
+                inputMode="decimal"
+                value={meta.investedAmount}
+                onChange={(e) => setMeta((m) => ({ ...m, investedAmount: e.target.value }))}
+                className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm"
+              />
+            </Labelled>
+            <Labelled label="Current value">
+              <input
+                type="number"
+                inputMode="decimal"
+                value={meta.currentValue}
+                onChange={(e) => setMeta((m) => ({ ...m, currentValue: e.target.value }))}
+                className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm"
+              />
+            </Labelled>
+          </div>
+        )}
+
+        <Labelled label="Notes">
+          <textarea
+            value={meta.notes}
+            onChange={(e) => setMeta((m) => ({ ...m, notes: e.target.value }))}
+            rows={2}
+            className="mt-3 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm"
+          />
+        </Labelled>
 
         <div className="mt-6 flex justify-end gap-2">
           <button
             onClick={onClose}
             className="rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm font-medium hover:bg-[var(--color-hover)]"
           >
-            Cancel
+            Close
           </button>
           <button
-            onClick={() => save.mutate()}
-            disabled={save.isPending || !(Number(price) > 0)}
+            onClick={() => saveMeta.mutate()}
+            disabled={saveMeta.isPending || !meta.name.trim()}
             className="rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
           >
-            Save price
+            Save
           </button>
         </div>
       </div>
+    </div>
+  )
+}
+
+/** One order in the trade list — a summary row that expands into an inline
+ * edit form, matching how transaction rows edit elsewhere in this app. */
+function TradeRow({
+  trade,
+  onSave,
+  onDelete,
+  busy,
+}: {
+  trade: InvestmentTrade
+  onSave: (data: TradeInput) => void
+  onDelete: () => void
+  busy: boolean
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState({
+    side: trade.side,
+    shares: String(trade.shares),
+    price: String(trade.price),
+    tradeDate: trade.tradeDate,
+  })
+
+  if (!editing) {
+    return (
+      <div className="flex items-center justify-between rounded px-1 py-1 text-sm hover:bg-[var(--color-hover)]">
+        <span className="text-[var(--color-text-muted)]">
+          {trade.side === 'buy' ? 'Bought' : 'Sold'} {Number(trade.shares.toFixed(4))} @{' '}
+          {formatMoney(trade.price, trade.currency)}
+        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-[var(--color-text-muted)]">
+            {formatDate(trade.tradeDate) || trade.tradeDate}
+          </span>
+          <button
+            type="button"
+            title="Edit order"
+            onClick={() => setEditing(true)}
+            className="text-[var(--color-text-subtle)] hover:text-[var(--color-text)]"
+          >
+            <Pencil size={12} />
+          </button>
+          <button
+            type="button"
+            title="Delete order"
+            onClick={onDelete}
+            disabled={busy}
+            className="text-[var(--color-text-subtle)] hover:text-[var(--color-negative)] disabled:opacity-50"
+          >
+            <Trash2 size={12} />
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 rounded bg-[var(--color-surface-2)] px-2 py-1.5">
+      <select
+        value={draft.side}
+        onChange={(e) => setDraft((d) => ({ ...d, side: e.target.value as 'buy' | 'sell' }))}
+        className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-1 text-xs"
+      >
+        <option value="buy">Buy</option>
+        <option value="sell">Sell</option>
+      </select>
+      <input
+        type="number"
+        inputMode="decimal"
+        placeholder="shares"
+        value={draft.shares}
+        onChange={(e) => setDraft((d) => ({ ...d, shares: e.target.value }))}
+        className="w-20 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-1 text-xs"
+      />
+      <input
+        type="number"
+        inputMode="decimal"
+        placeholder="price"
+        value={draft.price}
+        onChange={(e) => setDraft((d) => ({ ...d, price: e.target.value }))}
+        className="w-24 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-1 text-xs"
+      />
+      <input
+        type="date"
+        value={draft.tradeDate}
+        onChange={(e) => setDraft((d) => ({ ...d, tradeDate: e.target.value }))}
+        className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-1 text-xs"
+      />
+      <button
+        type="button"
+        disabled={busy || !(Number(draft.shares) > 0) || !(Number(draft.price) > 0)}
+        onClick={() => {
+          onSave({
+            side: draft.side,
+            shares: Number(draft.shares),
+            price: Number(draft.price),
+            tradeDate: draft.tradeDate,
+          })
+          setEditing(false)
+        }}
+        className="text-[var(--color-positive)] disabled:opacity-50"
+        title="Save"
+      >
+        <Check size={14} />
+      </button>
+      <button
+        type="button"
+        onClick={() => setEditing(false)}
+        className="text-[var(--color-text-subtle)] hover:text-[var(--color-text)]"
+        title="Cancel"
+      >
+        <X size={14} />
+      </button>
+    </div>
+  )
+}
+
+/** A compact inline form for adding an order by hand — a purchase the mail
+ * parser never saw, or a real cost correcting an approximated seed. */
+function AddTradeForm({
+  currency,
+  onAdd,
+  busy,
+}: {
+  currency: string
+  onAdd: (data: TradeInput) => void
+  busy: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  const [draft, setDraft] = useState({
+    side: 'buy' as 'buy' | 'sell',
+    shares: '',
+    price: '',
+    tradeDate: new Date().toISOString().slice(0, 10),
+  })
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="mt-2 flex items-center gap-1.5 text-xs font-medium text-[var(--color-accent-2)] hover:underline"
+      >
+        <Plus size={13} />
+        Add an order
+      </button>
+    )
+  }
+
+  const canSave = Number(draft.shares) > 0 && Number(draft.price) > 0
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-1.5 rounded bg-[var(--color-surface-2)] px-2 py-1.5">
+      <select
+        value={draft.side}
+        onChange={(e) => setDraft((d) => ({ ...d, side: e.target.value as 'buy' | 'sell' }))}
+        className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-1 text-xs"
+      >
+        <option value="buy">Buy</option>
+        <option value="sell">Sell</option>
+      </select>
+      <input
+        type="number"
+        inputMode="decimal"
+        placeholder="shares"
+        value={draft.shares}
+        onChange={(e) => setDraft((d) => ({ ...d, shares: e.target.value }))}
+        className="w-20 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-1 text-xs"
+      />
+      <input
+        type="number"
+        inputMode="decimal"
+        placeholder={`price (${currency})`}
+        value={draft.price}
+        onChange={(e) => setDraft((d) => ({ ...d, price: e.target.value }))}
+        className="w-28 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-1 text-xs"
+      />
+      <input
+        type="date"
+        value={draft.tradeDate}
+        onChange={(e) => setDraft((d) => ({ ...d, tradeDate: e.target.value }))}
+        className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 py-1 text-xs"
+      />
+      <button
+        type="button"
+        disabled={busy || !canSave}
+        onClick={() => {
+          onAdd({
+            side: draft.side,
+            shares: Number(draft.shares),
+            price: Number(draft.price),
+            tradeDate: draft.tradeDate,
+            orderType: 'manual',
+          })
+          setDraft({ side: 'buy', shares: '', price: '', tradeDate: draft.tradeDate })
+          setOpen(false)
+        }}
+        className="rounded bg-[var(--color-accent)] px-2.5 py-1 text-xs font-medium text-white disabled:opacity-50"
+      >
+        Add
+      </button>
+      <button
+        type="button"
+        onClick={() => setOpen(false)}
+        className="text-xs text-[var(--color-text-muted)] hover:underline"
+      >
+        Cancel
+      </button>
     </div>
   )
 }

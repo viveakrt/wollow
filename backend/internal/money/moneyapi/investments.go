@@ -64,6 +64,41 @@ func scanInvestment(scan func(...any) error) (models.Investment, error) {
 	return inv, nil
 }
 
+// attachTradeCounts sets HasTrades on every holding in one extra query,
+// rather than one query per row.
+func attachTradeCounts(db interface {
+	Query(string, ...any) (*sql.Rows, error)
+}, invs []models.Investment) error {
+	if len(invs) == 0 {
+		return nil
+	}
+	counted := make(map[int64]bool, len(invs))
+	rows, err := db.Query(`SELECT DISTINCT investment_id FROM investment_trades`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		counted[id] = true
+	}
+	for i := range invs {
+		invs[i].HasTrades = counted[invs[i].ID]
+	}
+	return rows.Err()
+}
+
+func investmentHasTrades(db interface {
+	QueryRow(string, ...any) *sql.Row
+}, id int64) bool {
+	var n int
+	db.QueryRow(`SELECT COUNT(*) FROM investment_trades WHERE investment_id = ?`, id).Scan(&n)
+	return n > 0
+}
+
 func (s *Server) handleListInvestments(w http.ResponseWriter, r *http.Request) {
 	where := "1 = 1"
 	args := []any{}
@@ -99,6 +134,10 @@ func (s *Server) handleListInvestments(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		investments = append(investments, inv)
+	}
+	if err := attachTradeCounts(s.DB, investments); err != nil {
+		httpx.WriteError(w, 500, err.Error())
+		return
 	}
 	httpx.WriteJSON(w, 200, investments)
 }
@@ -240,6 +279,16 @@ func (s *Server) handleCreateInvestment(w http.ResponseWriter, r *http.Request) 
 	httpx.WriteJSON(w, 201, inv)
 }
 
+// handleUpdateInvestment edits a holding's descriptive fields freely.
+//
+// Units, invested amount and current value are honoured only when the
+// holding has no trades. A trade-backed holding's numbers are DERIVED (see
+// ledger.RecomputeHolding) — accepting a client's copy of them here would work
+// once and then vanish the next time any trade or price update recomputes the
+// position, with nothing telling the user their edit was reverted. For those
+// holdings the correct lever is the trades themselves: see
+// handleAddInvestmentTrade / handleUpdateInvestmentTrade /
+// handleDeleteInvestmentTrade, all of which recompute afterward.
 func (s *Server) handleUpdateInvestment(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -253,21 +302,49 @@ func (s *Server) handleUpdateInvestment(w http.ResponseWriter, r *http.Request) 
 	}
 	applyInvestmentDefaults(&inv)
 
-	if _, err := s.DB.Exec(`
-		UPDATE investments SET
-			account_id = ?, kind = ?, institution = ?, name = ?, identifier = ?, currency = ?,
-			invested_amount = ?, current_value = ?, maturity_amount = ?, interest_rate = ?,
-			units = ?, start_date = ?, maturity_date = ?, status = ?, notes = ?,
-			updated_at = datetime('now')
-		WHERE id = ?`,
-		inv.AccountID, inv.Kind, inv.Institution, inv.Name, inv.Identifier, inv.Currency,
-		inv.InvestedAmount, inv.CurrentValue, inv.MaturityAmount, inv.InterestRate, inv.Units,
-		inv.StartDate, inv.MaturityDate, inv.Status, inv.Notes, id); err != nil {
-		httpx.WriteError(w, 500, err.Error())
+	hasTrades := investmentHasTrades(s.DB, id)
+	if hasTrades {
+		if _, err := s.DB.Exec(`
+			UPDATE investments SET
+				account_id = ?, kind = ?, institution = ?, name = ?, identifier = ?,
+				maturity_amount = ?, interest_rate = ?, start_date = ?, maturity_date = ?,
+				notes = ?, updated_at = datetime('now')
+			WHERE id = ?`,
+			inv.AccountID, inv.Kind, inv.Institution, inv.Name, inv.Identifier,
+			inv.MaturityAmount, inv.InterestRate, inv.StartDate, inv.MaturityDate, inv.Notes, id); err != nil {
+			httpx.WriteError(w, 500, err.Error())
+			return
+		}
+		// Currency and status follow the trades, not the request — changing
+		// either here without touching the trades would make the two disagree.
+		if err := ledger.RecomputeHolding(s.DB, id); err != nil {
+			httpx.WriteError(w, 500, err.Error())
+			return
+		}
+	} else {
+		if _, err := s.DB.Exec(`
+			UPDATE investments SET
+				account_id = ?, kind = ?, institution = ?, name = ?, identifier = ?, currency = ?,
+				invested_amount = ?, current_value = ?, maturity_amount = ?, interest_rate = ?,
+				units = ?, start_date = ?, maturity_date = ?, status = ?, notes = ?,
+				updated_at = datetime('now')
+			WHERE id = ?`,
+			inv.AccountID, inv.Kind, inv.Institution, inv.Name, inv.Identifier, inv.Currency,
+			inv.InvestedAmount, inv.CurrentValue, inv.MaturityAmount, inv.InterestRate, inv.Units,
+			inv.StartDate, inv.MaturityDate, inv.Status, inv.Notes, id); err != nil {
+			httpx.WriteError(w, 500, err.Error())
+			return
+		}
+	}
+
+	row := s.DB.QueryRow(`SELECT`+investmentColumns+` FROM investments WHERE id = ?`, id)
+	updated, err := scanInvestment(row.Scan)
+	if err != nil {
+		httpx.WriteError(w, 404, "holding not found")
 		return
 	}
-	inv.ID = id
-	httpx.WriteJSON(w, 200, inv)
+	updated.HasTrades = hasTrades
+	httpx.WriteJSON(w, 200, updated)
 }
 
 func (s *Server) handleDeleteInvestment(w http.ResponseWriter, r *http.Request) {
@@ -376,5 +453,172 @@ func (s *Server) handleSetInvestmentPrice(w http.ResponseWriter, r *http.Request
 		httpx.WriteError(w, 404, "holding not found")
 		return
 	}
+	inv.HasTrades = investmentHasTrades(s.DB, id)
+	httpx.WriteJSON(w, 200, inv)
+}
+
+type addTradeRequest struct {
+	Side      string  `json:"side"` // buy | sell
+	Shares    float64 `json:"shares"`
+	Price     float64 `json:"price"`
+	Amount    float64 `json:"amount"`
+	Currency  string  `json:"currency"`
+	TradeDate string  `json:"tradeDate"`
+	OrderType string  `json:"orderType"`
+}
+
+// handleAddInvestmentTrade records a trade the user enters by hand — filling
+// in a purchase the mail parser never saw, or correcting a demat statement's
+// approximated opening quantity with the real cost. It is the supported way
+// to change a trade-backed holding's numbers: see handleUpdateInvestment.
+func (s *Server) handleAddInvestmentTrade(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		httpx.WriteError(w, 400, "invalid id")
+		return
+	}
+	var req addTradeRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, 400, "invalid body")
+		return
+	}
+	if req.Side != "buy" && req.Side != "sell" {
+		httpx.WriteError(w, 400, "side must be buy or sell")
+		return
+	}
+	if req.Shares <= 0 {
+		httpx.WriteError(w, 400, "shares must be greater than zero")
+		return
+	}
+	if req.Amount <= 0 {
+		if req.Price <= 0 {
+			httpx.WriteError(w, 400, "amount or price is required")
+			return
+		}
+		req.Amount = req.Shares * req.Price
+	}
+	if req.Price <= 0 {
+		req.Price = req.Amount / req.Shares
+	}
+	if req.Currency == "" {
+		s.DB.QueryRow(`SELECT currency FROM investments WHERE id = ?`, id).Scan(&req.Currency)
+	}
+	if req.TradeDate == "" {
+		req.TradeDate = time.Now().UTC().Format("2006-01-02")
+	}
+
+	if _, err := s.DB.Exec(`
+		INSERT INTO investment_trades (investment_id, side, shares, price, amount, currency, trade_date, order_type, source)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'manual')`,
+		id, req.Side, req.Shares, req.Price, req.Amount, req.Currency, req.TradeDate, req.OrderType); err != nil {
+		httpx.WriteError(w, 500, err.Error())
+		return
+	}
+	if err := ledger.RecomputeHolding(s.DB, id); err != nil {
+		httpx.WriteError(w, 500, err.Error())
+		return
+	}
+	s.writeInvestmentWithTrades(w, id)
+}
+
+// handleUpdateInvestmentTrade edits one trade already on a holding — the
+// lever for correcting a figure that came from an approximation (a demat
+// statement's opening-balance seed, say) once the real cost is known.
+func (s *Server) handleUpdateInvestmentTrade(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		httpx.WriteError(w, 400, "invalid id")
+		return
+	}
+	tradeID, err := strconv.ParseInt(r.PathValue("tradeId"), 10, 64)
+	if err != nil {
+		httpx.WriteError(w, 400, "invalid trade id")
+		return
+	}
+	var req addTradeRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, 400, "invalid body")
+		return
+	}
+	if req.Side != "buy" && req.Side != "sell" {
+		httpx.WriteError(w, 400, "side must be buy or sell")
+		return
+	}
+	if req.Shares <= 0 {
+		httpx.WriteError(w, 400, "shares must be greater than zero")
+		return
+	}
+	if req.Amount <= 0 {
+		if req.Price <= 0 {
+			httpx.WriteError(w, 400, "amount or price is required")
+			return
+		}
+		req.Amount = req.Shares * req.Price
+	}
+	if req.Price <= 0 {
+		req.Price = req.Amount / req.Shares
+	}
+
+	res, err := s.DB.Exec(`
+		UPDATE investment_trades SET side = ?, shares = ?, price = ?, amount = ?, trade_date = ?, order_type = ?
+		WHERE id = ? AND investment_id = ?`,
+		req.Side, req.Shares, req.Price, req.Amount, req.TradeDate, req.OrderType, tradeID, id)
+	if err != nil {
+		httpx.WriteError(w, 500, err.Error())
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		httpx.WriteError(w, 404, "trade not found on this holding")
+		return
+	}
+	if err := ledger.RecomputeHolding(s.DB, id); err != nil {
+		httpx.WriteError(w, 500, err.Error())
+		return
+	}
+	s.writeInvestmentWithTrades(w, id)
+}
+
+// handleDeleteInvestmentTrade removes one trade and re-derives the position
+// from what's left — including all the way down to zero units if it was the
+// only one, at which point the holding simply reports nothing invested rather
+// than being force-deleted itself.
+func (s *Server) handleDeleteInvestmentTrade(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		httpx.WriteError(w, 400, "invalid id")
+		return
+	}
+	tradeID, err := strconv.ParseInt(r.PathValue("tradeId"), 10, 64)
+	if err != nil {
+		httpx.WriteError(w, 400, "invalid trade id")
+		return
+	}
+	res, err := s.DB.Exec(`DELETE FROM investment_trades WHERE id = ? AND investment_id = ?`, tradeID, id)
+	if err != nil {
+		httpx.WriteError(w, 500, err.Error())
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		httpx.WriteError(w, 404, "trade not found on this holding")
+		return
+	}
+	if err := ledger.RecomputeHolding(s.DB, id); err != nil {
+		httpx.WriteError(w, 500, err.Error())
+		return
+	}
+	s.writeInvestmentWithTrades(w, id)
+}
+
+// writeInvestmentWithTrades responds with the holding as it stands after a
+// trade mutation, so the client can update its numbers without a second
+// round trip.
+func (s *Server) writeInvestmentWithTrades(w http.ResponseWriter, id int64) {
+	row := s.DB.QueryRow(`SELECT`+investmentColumns+` FROM investments WHERE id = ?`, id)
+	inv, err := scanInvestment(row.Scan)
+	if err != nil {
+		httpx.WriteError(w, 404, "holding not found")
+		return
+	}
+	inv.HasTrades = investmentHasTrades(s.DB, id)
 	httpx.WriteJSON(w, 200, inv)
 }

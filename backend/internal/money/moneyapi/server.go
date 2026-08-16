@@ -100,6 +100,9 @@ func (s *Server) Register(mux *http.ServeMux) {
 	// The orders that built a position, and the price that values it. Money
 	// has no market feed, so the price is entered rather than fetched.
 	mux.HandleFunc("GET /api/money/investments/{id}/trades", s.handleListInvestmentTrades)
+	mux.HandleFunc("POST /api/money/investments/{id}/trades", s.handleAddInvestmentTrade)
+	mux.HandleFunc("PUT /api/money/investments/{id}/trades/{tradeId}", s.handleUpdateInvestmentTrade)
+	mux.HandleFunc("DELETE /api/money/investments/{id}/trades/{tradeId}", s.handleDeleteInvestmentTrade)
 	mux.HandleFunc("POST /api/money/investments/{id}/price", s.handleSetInvestmentPrice)
 
 	// One upload endpoint parses both an account statement and a deposit

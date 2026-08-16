@@ -121,6 +121,17 @@ export interface InvestmentTrade {
   createdAt: string
 }
 
+/** What POST/PUT .../trades accepts. Amount is derived server-side from
+ * shares × price when omitted, and vice versa. */
+export interface TradeInput {
+  side: 'buy' | 'sell'
+  shares: number
+  price?: number
+  amount?: number
+  tradeDate: string
+  orderType?: string
+}
+
 export interface Investment {
   id: number
   accountId?: number
@@ -146,6 +157,13 @@ export interface Investment {
    * return.
    */
   priced: boolean
+  /**
+   * Whether units/investedAmount/currentValue are DERIVED from trades. When
+   * true, editing those three fields on the holding itself has no effect —
+   * the server ignores them and re-derives from investment_trades on every
+   * save. Edit the trades instead (add/update/delete under .../trades).
+   */
+  hasTrades: boolean
   startDate: string
   maturityDate: string
   status: 'active' | 'matured' | 'closed'
@@ -334,6 +352,11 @@ export interface DashboardSummary {
   totalSavings: number
   /** Accounts that exist but are switched out of the totals. */
   excludedAccounts: number
+  /** Sum of every account_type='family' account's own balance, independent of netWorth. */
+  familyNetWorth: number
+  familyAssets: number
+  familyLiabilities: number
+  familyAccountCount: number
   transactionCount: number
   cashFlow: {
     income: number

@@ -10,6 +10,7 @@ import type {
   Investment,
   InvestmentSummary,
   InvestmentTrade,
+  TradeInput,
   ParsedDeposit,
   EmailAccount,
   Bill,
@@ -66,6 +67,15 @@ export const api = {
     delete: (id: number) => http.delete<void>(`${BASE}/investments/${id}`),
     // The orders that built a position — the evidence behind its average cost.
     trades: (id: number) => http.get<InvestmentTrade[]>(`${BASE}/investments/${id}/trades`),
+    // A trade-backed holding's units/invested/current value are DERIVED —
+    // these are the only way to actually change them; editing the holding
+    // itself only ever touches its descriptive fields for such a holding.
+    addTrade: (id: number, data: TradeInput) =>
+      http.post<Investment>(`${BASE}/investments/${id}/trades`, data),
+    updateTrade: (id: number, tradeId: number, data: TradeInput) =>
+      http.put<Investment>(`${BASE}/investments/${id}/trades/${tradeId}`, data),
+    deleteTrade: (id: number, tradeId: number) =>
+      http.delete<Investment>(`${BASE}/investments/${id}/trades/${tradeId}`),
     // Money has no market feed, so a holding is valued by entering its price.
     setPrice: (id: number, price: number, asOf?: string) =>
       http.post<Investment>(`${BASE}/investments/${id}/price`, { price, asOf }),

@@ -47,6 +47,10 @@ function withDefaults(s: DashboardSummary): DashboardSummary {
     liquidAssets: s.liquidAssets ?? 0,
     investmentValue: s.investmentValue ?? 0,
     excludedAccounts: s.excludedAccounts ?? 0,
+    familyNetWorth: s.familyNetWorth ?? 0,
+    familyAssets: s.familyAssets ?? 0,
+    familyLiabilities: s.familyLiabilities ?? 0,
+    familyAccountCount: s.familyAccountCount ?? 0,
     netWorthTrend: s.netWorthTrend ?? [],
     foreignHoldings: s.foreignHoldings ?? [],
     foreignConvertedInr: s.foreignConvertedInr ?? 0,
@@ -183,6 +187,18 @@ export function Dashboard() {
                   : undefined
               }
             />
+            {summary.familyAccountCount > 0 && (
+              <StatTile
+                icon={Users}
+                label="Family Net Worth"
+                value={formatINR(summary.familyNetWorth, true)}
+                iconColor="text-[var(--color-tint-pink)]"
+                iconBg="bg-[var(--color-tint-pink-bg)]"
+                sublabel={{
+                  text: `${summary.familyAccountCount} account${summary.familyAccountCount !== 1 ? 's' : ''} · kept out of your net worth above`,
+                }}
+              />
+            )}
           </div>
 
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-5 mb-5">
@@ -471,10 +487,13 @@ function AccountsOverview({
   const groups: { title: string; filter: (a: DashboardSummary['accounts'][number]) => boolean }[] = [
     { title: 'Cash & Bank', filter: (a) => ['bank', 'wallet', 'cash'].includes(a.accountType) },
     { title: 'Credit Cards & Loans', filter: (a) => LIABILITY_TYPES.has(a.accountType) },
+    { title: 'Family', filter: (a) => a.accountType === 'family' },
     {
       title: 'Deposits & Other',
       filter: (a) =>
-        !['bank', 'wallet', 'cash'].includes(a.accountType) && !LIABILITY_TYPES.has(a.accountType),
+        !['bank', 'wallet', 'cash'].includes(a.accountType) &&
+        !LIABILITY_TYPES.has(a.accountType) &&
+        a.accountType !== 'family',
     },
   ]
   return (
@@ -482,9 +501,13 @@ function AccountsOverview({
       {groups.map((g) => {
         const members = accounts.filter(g.filter)
         if (members.length === 0) return null
-        const subtotal = members
-          .filter((a) => a.includeInNetworth)
-          .reduce((s, a) => s + a.currentBalance, 0)
+        // The Family group is a visibility total, not a net-worth one — these
+        // accounts are usually excluded from net worth on purpose, so the
+        // subtotal sums every member rather than filtering by that flag.
+        const subtotal =
+          g.title === 'Family'
+            ? members.reduce((s, a) => s + a.currentBalance, 0)
+            : members.filter((a) => a.includeInNetworth).reduce((s, a) => s + a.currentBalance, 0)
         return (
           <div key={g.title}>
             <div className="flex items-center justify-between mb-2">

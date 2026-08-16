@@ -126,14 +126,23 @@ type dashboardSummary struct {
 	// ExcludedAccounts is how many accounts exist but are switched out of the
 	// totals, so the UI can say "3 accounts not counted" instead of silently
 	// showing smaller numbers.
-	ExcludedAccounts int                     `json:"excludedAccounts"`
-	TransactionCount int                     `json:"transactionCount"`
-	CashFlow         cashFlowSummary         `json:"cashFlow"`
-	NetWorthTrend    []netWorthPoint         `json:"netWorthTrend"`
-	Accounts         []accountSummaryItem    `json:"accounts"`
-	ExpenseBreakdown []categoryBreakdownItem `json:"expenseBreakdown"`
-	TopMerchants     []merchantSummaryItem   `json:"topMerchants"`
-	UpcomingBills    []upcomingBillItem      `json:"upcomingBills"`
+	ExcludedAccounts int `json:"excludedAccounts"`
+	// FamilyNetWorth/-Assets/-Liabilities sum every account_type='family'
+	// account's own balance — independent of NetWorth above, which those
+	// accounts are normally excluded from. Without this, marking an account
+	// "family" makes its money disappear from the dashboard entirely rather
+	// than showing up as its own total.
+	FamilyNetWorth     float64                 `json:"familyNetWorth"`
+	FamilyAssets       float64                 `json:"familyAssets"`
+	FamilyLiabilities  float64                 `json:"familyLiabilities"`
+	FamilyAccountCount int                     `json:"familyAccountCount"`
+	TransactionCount   int                     `json:"transactionCount"`
+	CashFlow           cashFlowSummary         `json:"cashFlow"`
+	NetWorthTrend      []netWorthPoint         `json:"netWorthTrend"`
+	Accounts           []accountSummaryItem    `json:"accounts"`
+	ExpenseBreakdown   []categoryBreakdownItem `json:"expenseBreakdown"`
+	TopMerchants       []merchantSummaryItem   `json:"topMerchants"`
+	UpcomingBills      []upcomingBillItem      `json:"upcomingBills"`
 }
 
 // handleDashboardSummary aggregates figures for the dashboard. Accepts
@@ -229,6 +238,18 @@ func (s *Server) handleDashboardSummary(w http.ResponseWriter, r *http.Request) 
 		}
 		summary.Accounts = append(summary.Accounts, a)
 
+		// Family accounts are tracked in their own total regardless of
+		// IncludeInNetWorth — that flag controls the *personal* figure below,
+		// but a family account's balance should still be visible somewhere.
+		if a.AccountType == "family" {
+			summary.FamilyAccountCount++
+			if a.CurrentBalance < 0 {
+				summary.FamilyLiabilities += -a.CurrentBalance
+			} else {
+				summary.FamilyAssets += a.CurrentBalance
+			}
+		}
+
 		if !a.IncludeInNetWorth {
 			summary.ExcludedAccounts++
 			continue
@@ -252,6 +273,7 @@ func (s *Server) handleDashboardSummary(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	rows.Close()
+	summary.FamilyNetWorth = summary.FamilyAssets - summary.FamilyLiabilities
 
 	// Deposits and holdings are assets the account tables know nothing about;
 	// leaving them out is why net worth read low for anyone with an FD or PPF.
