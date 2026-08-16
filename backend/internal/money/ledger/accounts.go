@@ -27,24 +27,31 @@ type AccountHint struct {
 }
 
 // placeholderKind is the type an email-created account gets when the alert
-// didn't say what kind of account it was. It is the only type ResolveAccount
-// will overwrite later, once a clearer alert arrives.
+// didn't say what kind of account it was.
 const placeholderKind = "bank"
 
 // MatchAccount finds the finance account an alert belongs to WITHOUT creating
 // one, returning 0 when nothing registered matches.
-//
-// This is what email ingest uses, and the restraint is the point. Inventing an
-// account from whatever alert happens to arrive gets two things wrong that are
-// expensive to undo: a mailbox full of receipts becomes a list of accounts the
-// user never opened, and — worse — one card-shaped alert can define a savings
-// account as a credit card, which then reports its balance as debt.
-//
-// The user adds accounts themselves instead. Mail naming an account that does
-// not exist is held, not guessed at, and attaches on a later pass once they
-// have added it — see the pending_account outcome in the ingest package.
 func MatchAccount(db *sql.DB, hint AccountHint) int64 {
 	return matchExisting(db, normalizeHint(hint))
+}
+
+// ResolveAccount finds the finance account an alert belongs to, auto-creating
+// one from the alert's own evidence (issuer, last four, and the kind
+// KindForAlert read off the message) when nothing registered matches yet.
+//
+// This is what email ingest uses so that a bank, card, or broker mail turns
+// into a tracked account and a transaction in one pass, with nothing for the
+// user to approve first. The kind guess can be wrong — a card-shaped alert
+// sharing digits with a savings account, say — which is exactly why an
+// account's type is never rewritten once it exists (below): the guess stands
+// until the user corrects it by hand, and only that manual correction sticks.
+func ResolveAccount(db *sql.DB, hint AccountHint) int64 {
+	h := normalizeHint(hint)
+	if id := matchExisting(db, h); id != 0 {
+		return id
+	}
+	return createAccount(db, h, "email")
 }
 
 // CreateApprovedAccount records an account a person has agreed to, and is the

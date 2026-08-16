@@ -433,8 +433,6 @@ export interface SyncResult {
   balances: number
   unrecognized: number
   duplicates: number
-  /** Parsed fine but name an account you haven't added; they import once you do. */
-  pendingAccount: number
   /** Could not be fetched or recorded this pass; retried on the next one. */
   failed: number
 }
@@ -442,8 +440,10 @@ export interface SyncResult {
 /**
  * A rescan clears message links whose transaction, bill, or trade was
  * deleted (typically the account or holding it belonged to was deleted,
- * cascading the transaction away with it) and re-ingests them, since an
- * ordinary sync never looks at an already-linked message again.
+ * cascading the transaction away with it), and links left 'unrecognized'
+ * before their account existed or before the parser learned their template —
+ * then re-ingests them, since an ordinary sync never looks at an
+ * already-linked message again.
  */
 export interface RescanResult extends SyncResult {
   /** Stale links cleared before re-ingesting — recovered history, not new mail. */

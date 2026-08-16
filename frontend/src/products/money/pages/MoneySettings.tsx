@@ -111,14 +111,8 @@ export function MoneySettings() {
                         {lastSync.result.transactions !== 1 ? 's' : ''}, {lastSync.result.bills} bill
                         {lastSync.result.bills !== 1 ? 's' : ''} ({lastSync.result.scanned} emails scanned)
                       </div>
-                      {/* Both of these used to be invisible, which is how a
-                          stalled import looked exactly like a finished one. */}
-                      {lastSync.result.pendingAccount > 0 && (
-                        <div className="mt-1 text-xs text-[var(--color-text-muted)]">
-                          {lastSync.result.pendingAccount} waiting for an account you haven't added
-                          yet — they'll import once you add it.
-                        </div>
-                      )}
+                      {/* This used to be invisible, which is how a stalled
+                          import looked exactly like a finished one. */}
                       {lastSync.result.failed > 0 && (
                         <div className="mt-1 text-xs text-[var(--color-tint-orange)]">
                           {lastSync.result.failed} could not be read this time; they'll be retried.
@@ -130,8 +124,8 @@ export function MoneySettings() {
                     <div className="mt-1 flex items-center gap-1.5 text-xs text-[var(--color-positive)]">
                       <CheckCircle2 size={12} />
                       {lastRescan.result.cleared === 0
-                        ? 'Nothing stranded — every recognized message still has its transaction, bill, or trade.'
-                        : `Recovered ${lastRescan.result.transactions} transaction${lastRescan.result.transactions !== 1 ? 's' : ''}, ${lastRescan.result.bills} bill${lastRescan.result.bills !== 1 ? 's' : ''} from ${lastRescan.result.cleared} stranded message${lastRescan.result.cleared !== 1 ? 's' : ''}.`}
+                        ? 'Nothing stuck — every message already has its transaction, bill, or trade.'
+                        : `Recovered ${lastRescan.result.transactions} transaction${lastRescan.result.transactions !== 1 ? 's' : ''}, ${lastRescan.result.bills} bill${lastRescan.result.bills !== 1 ? 's' : ''} from ${lastRescan.result.cleared} stuck message${lastRescan.result.cleared !== 1 ? 's' : ''}.`}
                     </div>
                   )}
                 </div>
@@ -140,7 +134,7 @@ export function MoneySettings() {
                     type="button"
                     onClick={() => rescanMutation.mutate(account.id)}
                     disabled={rescanMutation.isPending && rescanMutation.variables === account.id}
-                    title="Recover transactions, bills, and trades left stranded by a deleted account or holding"
+                    title="Recover transactions, bills, and trades left stranded by a deleted account or holding, and retry mail that couldn't be read the first time"
                     className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--color-hover)] disabled:opacity-50"
                   >
                     {rescanMutation.isPending && rescanMutation.variables === account.id ? (

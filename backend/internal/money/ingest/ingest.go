@@ -55,11 +55,6 @@ type Result struct {
 	Duplicates   int `json:"duplicates"`
 	// Trades counts broker order confirmations turned into holdings.
 	Trades int `json:"trades"`
-	// PendingAccount counts messages that parsed fine but name an account the
-	// user has not registered. They are deliberately left unlinked so that
-	// approving the account and syncing again imports their history, rather
-	// than the alternative of inventing an account nobody asked for.
-	PendingAccount int `json:"pendingAccount"`
 	// PendingPDFPassword counts password-protected statements (a Zerodha
 	// contract note, a demat holding statement) waiting on a password for
 	// their issuer. Same held-for-retry treatment as PendingAccount.
@@ -196,14 +191,6 @@ func processOne(db *sql.DB, accountID int64, c candidate, raw []byte, result *Re
 		result.Balances++
 	case "trade":
 		result.Trades++
-	case pendingAccountOutcome:
-		// Understood, but there is nowhere to put it yet. Writing no link is
-		// what makes this retryable: selectCandidates picks the message up
-		// again on the next pass, so the moment the user approves the account
-		// its whole mail history flows in. Linking it here would mark it
-		// handled forever and silently lose that history.
-		result.PendingAccount++
-		return nil
 	case pendingPDFPasswordOutcome:
 		// Same reasoning, for a statement this pass can't open yet: adding or
 		// fixing the password in Settings and syncing again picks it back up.
@@ -285,48 +272,54 @@ func selectCandidates(db *sql.DB, accountID int64, folder string) ([]candidate, 
 	return out, rows.Err()
 }
 
-// RescanOrphaned clears message_links rows left pointing at nothing: a
-// message that was correctly read as a transaction, bill, or trade, whose
-// target row was later deleted (an account's transactions cascade away with
-// it; bills and trades instead survive with their link column set to NULL).
-// Once a message has any message_links row, selectCandidates never looks at
-// it again — so without this, recreating the account does not bring the old
-// mail back, only new mail from here on.
+// RescanStuck clears message_links rows that deserve another pass through the
+// parsers rather than standing forever as their first result. Once a message
+// has any message_links row, selectCandidates never looks at it again — so
+// without this, nothing below ever gets a second chance.
 //
-// It only removes links whose target is confirmed gone (transaction_id/
-// bill_id/investment_id IS NULL for that parsed_as), never a link that still
-// points at a real row, so a rescan cannot relabel or duplicate anything that
-// is already correct.
-func RescanOrphaned(db *sql.DB, mailAccountID int64) (int64, error) {
+// Two situations qualify:
+//
+//   - Orphaned: a message correctly read as a transaction, bill, or trade
+//     whose target row was later deleted (an account's transactions cascade
+//     away with it; bills and trades instead survive with their link column
+//     set to NULL). Recreating the account should bring the old mail back,
+//     not just catch new mail from here on.
+//   - Unrecognized: a message the parsers could not read at the time —
+//     because the account it named did not exist yet (accounts now
+//     auto-create, but this link predates that), or because the parser has
+//     since learned the template. Re-linking costs nothing: anything still
+//     genuinely unparseable just lands back as 'unrecognized' unchanged.
+//
+// Orphaned links are only removed when their target is confirmed gone
+// (transaction_id/bill_id/investment_id IS NULL for that parsed_as), never one
+// still pointing at a real row — so this can add missing history but never
+// relabel or duplicate anything already correct.
+func RescanStuck(db *sql.DB, mailAccountID int64) (int64, error) {
 	res, err := db.Exec(`
 		DELETE FROM message_links
 		WHERE mail_account_id = ?
 		  AND ((parsed_as = 'transaction' AND transaction_id IS NULL)
 		    OR (parsed_as = 'bill' AND bill_id IS NULL)
-		    OR (parsed_as = 'trade' AND investment_id IS NULL))`,
+		    OR (parsed_as = 'trade' AND investment_id IS NULL)
+		    OR parsed_as = 'unrecognized')`,
 		mailAccountID)
 	if err != nil {
-		return 0, fmt.Errorf("clearing orphaned links: %w", err)
+		return 0, fmt.Errorf("clearing stuck links: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	return n, nil
 }
 
-// pendingAccountOutcome marks a message that was understood but names an
-// account nobody has registered. It never reaches message_links — see
-// processOne — it only tells the caller to leave the message for a later pass.
-const pendingAccountOutcome = "pending_account"
-
 // pendingPDFPasswordOutcome marks a password-protected investment statement
-// this pass could not open. Same treatment as pendingAccountOutcome: no link
-// is written, so it is retried once a password is configured.
+// this pass could not open. No link is written, so it is retried once a
+// password is configured.
 const pendingPDFPasswordOutcome = "pending_pdf_password"
 
 // Outcome is what Money made of a single message.
 type Outcome struct {
-	// ParsedAs is transaction | bill | balance | unrecognized, and lands in
-	// message_links so the inbox can show it. The one value that does not is
-	// pending_account.
+	// ParsedAs is transaction | bill | balance | trade | unrecognized, and
+	// lands in message_links so the inbox can show it. The one value that does
+	// not is pending_pdf_password.
 	ParsedAs      string
 	TransactionID *int64
 	BillID        *int64
@@ -337,8 +330,6 @@ type Outcome struct {
 }
 
 func unrecognized() Outcome { return Outcome{ParsedAs: "unrecognized"} }
-
-func pendingAccount() Outcome { return Outcome{ParsedAs: pendingAccountOutcome} }
 
 func pendingPDFPassword() Outcome { return Outcome{ParsedAs: pendingPDFPasswordOutcome} }
 
@@ -409,11 +400,11 @@ func PersistWithPasswords(db *sql.DB, inst *emailparse.Institution, e *emailpars
 	}
 
 	last4 := firstNonEmpty(txn.AccountLast4, facts.AccountLast4)
-	accountID := ledger.MatchAccount(db, ledger.AccountHint{
+	accountID := ledger.ResolveAccount(db, ledger.AccountHint{
 		Issuer: issuer, Name: institutionName, Last4: last4, Kind: kind,
 	})
 	if accountID == 0 {
-		return pendingAccount()
+		return unrecognized()
 	}
 
 	if txn.TxnDate == "" {
@@ -510,18 +501,16 @@ func persistBill(db *sql.DB, issuer, institutionName string, e *emailparse.Email
 	// The card product name is preferred over the bank's: an issuer sends
 	// statements for several cards, and naming them all after the bank would
 	// pile every one of them into a single account.
-	accountID := ledger.MatchAccount(db, ledger.AccountHint{
+	accountID := ledger.ResolveAccount(db, ledger.AccountHint{
 		Issuer: issuer,
 		Name:   firstNonEmpty(bill.CardName, institutionName),
 		Last4:  bill.CardLast4,
 		Kind:   string(emailparse.KindCreditCard),
 	})
 	if accountID == 0 {
-		// No registered card to hang this statement on. Held for retry rather
-		// than stored account-less: a due date attached to nothing cannot be
-		// reconciled, and a broker's "account statement" reaching this path at
-		// all is usually a misread, not a real bill.
-		return pendingAccount()
+		// A due date attached to nothing cannot be reconciled — this is a
+		// genuine failure to record the card, not a missing approval.
+		return unrecognized()
 	}
 
 	// Issuers resend statements (reminders, duplicates on request). The unique
@@ -706,11 +695,11 @@ func persistZerodhaTrades(db *sql.DB, trades []models.ParsedTrade, e *emailparse
 func persistBalanceOnly(db *sql.DB, issuer, institutionName, kind string,
 	facts emailparse.AccountFacts, emailDate string) Outcome {
 
-	accountID := ledger.MatchAccount(db, ledger.AccountHint{
+	accountID := ledger.ResolveAccount(db, ledger.AccountHint{
 		Issuer: issuer, Name: institutionName, Last4: facts.AccountLast4, Kind: kind,
 	})
 	if accountID == 0 {
-		return pendingAccount()
+		return unrecognized()
 	}
 	recordFacts(db, accountID, facts, emailDate)
 	return Outcome{ParsedAs: "balance", AccountID: accountID}

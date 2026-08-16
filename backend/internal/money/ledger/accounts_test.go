@@ -100,6 +100,66 @@ func TestMatchAccountWithoutDigitsNeedsAnIssuer(t *testing.T) {
 	}
 }
 
+// ResolveAccount is what ingest uses instead of MatchAccount: same match
+// first, but it auto-creates from the alert's own evidence rather than
+// returning 0 when nothing registered matches.
+func TestResolveAccountCreatesFromTheAlert(t *testing.T) {
+	db := newAccountsDB(t)
+
+	id := ResolveAccount(db, AccountHint{Issuer: "HDFC", Name: "HDFC Bank", Last4: "4125", Kind: "bank"})
+	if id == 0 {
+		t.Fatal("no account created")
+	}
+	var name, bank, kind, number, source string
+	db.QueryRow(`SELECT name, bank, account_type, account_number, source
+		FROM finance_accounts WHERE id = ?`, id).Scan(&name, &bank, &kind, &number, &source)
+
+	if source != "email" {
+		t.Errorf("source = %q, want \"email\" — distinguishes an auto-created account from one the user typed in", source)
+	}
+	if name != "HDFC Bank •• 4125" || bank != "HDFC" || kind != "bank" {
+		t.Errorf("account = %q/%q/%q, want \"HDFC Bank •• 4125\"/\"HDFC\"/\"bank\"", name, bank, kind)
+	}
+	if number != "XXXXXXXX4125" {
+		t.Errorf("account_number = %q, want the masked form statements also use", number)
+	}
+}
+
+// A second alert about the same account must reuse it, not create a sibling —
+// otherwise every fresh sync of a mailbox would double every account it names.
+func TestResolveAccountReusesWhatItJustCreated(t *testing.T) {
+	db := newAccountsDB(t)
+	hint := AccountHint{Issuer: "Axis", Name: "Axis Bank", Last4: "5792", Kind: "credit_card"}
+
+	first := ResolveAccount(db, hint)
+	second := ResolveAccount(db, hint)
+	if first != second {
+		t.Errorf("first call returned %d, second returned %d — want the same account", first, second)
+	}
+	var n int
+	db.QueryRow(`SELECT COUNT(*) FROM finance_accounts`).Scan(&n)
+	if n != 1 {
+		t.Errorf("created %d accounts for two alerts about the same one, want 1", n)
+	}
+}
+
+// A manually-added account still wins the match — ResolveAccount must not
+// create a duplicate beside one the user already entered by hand.
+func TestResolveAccountPrefersAnExistingManualAccount(t *testing.T) {
+	db := newAccountsDB(t)
+	want := addAccount(t, db, "My HDFC Savings", "HDFC", "bank", "XXXXXXXX4125")
+
+	got := ResolveAccount(db, AccountHint{Issuer: "HDFC", Name: "HDFC Bank", Last4: "4125", Kind: "bank"})
+	if got != want {
+		t.Errorf("resolved %d, want the existing manual account %d", got, want)
+	}
+	var n int
+	db.QueryRow(`SELECT COUNT(*) FROM finance_accounts`).Scan(&n)
+	if n != 1 {
+		t.Errorf("finance_accounts has %d rows, want 1 — a manual account must not be duplicated", n)
+	}
+}
+
 func TestCreateApprovedAccountIsManualSourced(t *testing.T) {
 	db := newAccountsDB(t)
 

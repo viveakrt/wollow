@@ -86,13 +86,14 @@ type rescanResult struct {
 	*ingest.Result
 }
 
-// handleRescanEmailAccount repairs the gap a deleted account leaves behind:
-// once a message is linked, an ordinary sync never looks at it again, so a
-// transaction/bill/trade whose account or holding was deleted stays lost even
-// after the account is recreated. This clears exactly those orphaned links
-// (see ingest.RescanOrphaned — never a link still pointing at a real row) and
-// immediately re-ingests them, so recreating the account recovers the history
-// in one action instead of leaving it stranded.
+// handleRescanEmailAccount repairs the two ways a message_links row goes
+// stale: a transaction/bill/trade whose account or holding was later deleted
+// (recreating it should bring the old mail back), and a message that landed
+// 'unrecognized' before its account existed or before the parser learned its
+// template. Once a message is linked, an ordinary sync never looks at it
+// again, so this clears exactly those stuck links (see ingest.RescanStuck —
+// never a link still pointing at a real row) and immediately re-ingests them,
+// recovering everything fixable in one action.
 func (s *Server) handleRescanEmailAccount(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -106,7 +107,7 @@ func (s *Server) handleRescanEmailAccount(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	cleared, err := ingest.RescanOrphaned(s.DB, id)
+	cleared, err := ingest.RescanStuck(s.DB, id)
 	if err != nil {
 		httpx.WriteError(w, 500, err.Error())
 		return

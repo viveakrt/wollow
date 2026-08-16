@@ -120,8 +120,9 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/money/email-accounts", s.handleListEmailAccounts)
 	mux.HandleFunc("POST /api/money/email-accounts/{id}/sync", s.handleSyncEmailAccount)
 	// Recovers transactions/bills/trades stranded when their account or holding
-	// was deleted after the mail that produced them was already linked — see
-	// ingest.RescanOrphaned for why an ordinary sync can't reach them.
+	// was deleted, and retries mail marked unrecognized before its account
+	// existed or before the parser learned its template — see ingest.RescanStuck
+	// for why an ordinary sync can't reach either on its own.
 	mux.HandleFunc("POST /api/money/email-accounts/{id}/rescan", s.handleRescanEmailAccount)
 
 	// Exchange rates that bring foreign holdings into the rupee net worth.

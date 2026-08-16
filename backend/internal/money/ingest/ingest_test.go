@@ -202,7 +202,7 @@ func TestIngestFromIndex(t *testing.T) {
 	// this whole package exists to prevent. (Duplicates overlap the buckets by
 	// design — a duplicate still reports what it parsed as — so it is excluded.)
 	bucketed := result.Transactions + result.Bills + result.Balances + result.Trades +
-		result.Unrecognized + result.PendingAccount + result.PendingPDFPassword
+		result.Unrecognized + result.PendingPDFPassword
 	if bucketed != result.Scanned {
 		t.Errorf("%d messages scanned but %d accounted for (%+v) — some outcome is unreported",
 			result.Scanned, bucketed, *result)
@@ -212,12 +212,6 @@ func TestIngestFromIndex(t *testing.T) {
 	// none of them means the parsers stopped working even if nothing panicked.
 	if result.Transactions+result.Bills+result.Balances == 0 {
 		t.Error("the sample emails produced nothing at all")
-	}
-
-	// Every account these samples name is seeded, so nothing should be held.
-	if result.PendingAccount != 0 {
-		t.Errorf("%d messages held for a missing account, want 0 — seedAccounts is out of "+
-			"step with the samples, so part of the pipeline is untested", result.PendingAccount)
 	}
 
 	// Bodies must only be fetched for messages already picked out of the index.
@@ -241,7 +235,7 @@ func TestIngestFromIndex(t *testing.T) {
 	var links, linked int
 	conn.QueryRow(`SELECT COUNT(*) FROM message_links`).Scan(&links)
 	conn.QueryRow(`SELECT COUNT(*) FROM message_links WHERE message_id IS NOT NULL`).Scan(&linked)
-	held := result.PendingAccount + result.PendingPDFPassword
+	held := result.PendingPDFPassword
 	if want := result.Scanned - result.Duplicates - held; links != want {
 		t.Errorf("message_links has %d rows, want %d (scanned − duplicates − held)", links, want)
 	}
@@ -252,11 +246,12 @@ func TestIngestFromIndex(t *testing.T) {
 
 // A batch that cannot be fetched must not starve the messages behind it.
 //
-// This is a regression test for a stall that reached real data: messages held
-// for a missing account are left unlinked so they can be retried, so they stay
-// at the front of the UID-ordered queue. When one batch failed the whole pass
-// returned, which meant every later message was skipped again on every
-// subsequent run — mail kept arriving and nothing was ever imported again.
+// This is a regression test for a stall that reached real data: a message
+// this pass could not fetch is left unlinked so it can be retried, which
+// means it stays at the front of the UID-ordered queue. When one batch failed
+// the whole pass returned, which meant every later message was skipped again
+// on every subsequent run — mail kept arriving and nothing was ever imported
+// again.
 func TestFailedFetchDoesNotStarveLaterMessages(t *testing.T) {
 	samples := loadSamples(t)
 	if len(samples) < 2 {
@@ -312,11 +307,10 @@ func TestIngestIsIdempotent(t *testing.T) {
 		t.Fatalf("second pass: %v", err)
 	}
 
-	// Anything genuinely pending (an unregistered account, a statement with no
-	// password yet) is SUPPOSED to be picked up again — that is the whole
-	// point of leaving it unlinked. Only already-linked messages must not be
-	// re-selected.
-	wantRescanned := first.PendingAccount + first.PendingPDFPassword
+	// Anything genuinely pending (a statement with no password yet) is
+	// SUPPOSED to be picked up again — that is the whole point of leaving it
+	// unlinked. Only already-linked messages must not be re-selected.
+	wantRescanned := first.PendingPDFPassword
 	if second.Scanned != wantRescanned {
 		t.Errorf("second pass scanned %d, want %d (only what's still pending) — already-linked "+
 			"messages must not be re-selected", second.Scanned, wantRescanned)
@@ -397,11 +391,10 @@ func TestClassifierWidensTheNet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
-	// Whatever was already pending from the baseline pass (an unregistered
-	// account, a not-yet-password statement) legitimately gets re-scanned
-	// too — the newly classified outsider is the ONE NEW arrival, not the
-	// only thing scanned.
-	wantScanned := 1 + baseline.PendingAccount + baseline.PendingPDFPassword
+	// Whatever was already pending from the baseline pass (a not-yet-password
+	// statement) legitimately gets re-scanned too — the newly classified
+	// outsider is the ONE NEW arrival, not the only thing scanned.
+	wantScanned := 1 + baseline.PendingPDFPassword
 	if result.Scanned != wantScanned {
 		t.Errorf("scanned = %d, want %d — the newly classified message plus whatever was still pending",
 			result.Scanned, wantScanned)
@@ -457,40 +450,37 @@ func TestPersistRealSampleEmails(t *testing.T) {
 	if counts["transaction"] == 0 {
 		t.Error("expected at least one transaction from the sample emails")
 	}
-	// Bills and balances are only asserted when the current samples contain
-	// that kind of mail — the folder is curated by hand, so requiring one of
-	// each would fail on a perfectly good set of transaction alerts.
-	if counts[pendingAccountOutcome] != 0 {
-		t.Errorf("%d samples were held for a missing account; seedAccounts needs the account "+
-			"those samples name", counts[pendingAccountOutcome])
-	}
 
-	// Ingest must not have invented anything: the accounts present are exactly
-	// the ones seeded, with the types the user chose still intact. The HDFC
-	// savings account staying 'bank' is the specific regression that matters —
-	// a card-shaped HDFC alert naming the same digits used to flip it to
-	// credit_card, which reports a salary account's balance as debt.
+	// The 5 seeded accounts must survive untouched: still 'manual', still the
+	// type the user chose. The HDFC savings account staying 'bank' is the
+	// specific regression that matters — a card-shaped HDFC alert naming the
+	// same digits used to flip it to credit_card, which reports a salary
+	// account's balance as debt. Samples naming an account outside the seeded
+	// five are expected to auto-create one (source='email') rather than being
+	// held — see TestUnknownAccountAutoCreatesItself.
 	rows, err := conn.Query(`SELECT name, bank, account_type, source FROM finance_accounts ORDER BY id`)
 	if err != nil {
 		t.Fatalf("listing accounts: %v", err)
 	}
 	defer rows.Close()
-	count := 0
+	seeded, invented := 0, 0
 	for rows.Next() {
 		var name, bank, kind, source string
 		if err := rows.Scan(&name, &bank, &kind, &source); err != nil {
 			t.Fatalf("scanning account: %v", err)
 		}
-		count++
 		t.Logf("account: %-42s bank=%-8s type=%-12s source=%s", name, bank, kind, source)
-		if source != "manual" {
-			t.Errorf("account %q has source=%q — ingest must not create accounts", name, source)
+		if source == "manual" {
+			seeded++
+		} else {
+			invented++
 		}
 	}
-	if count != 5 {
-		t.Errorf("finance_accounts has %d rows, want the 5 seeded — ingest created %d of its own",
-			count, count-5)
+	if seeded != 5 {
+		t.Errorf("%d of the 5 seeded accounts still read source='manual', want 5 — ingest must "+
+			"never rewrite an account the user chose", seeded)
 	}
+	t.Logf("%d accounts auto-created from mail naming an account outside the seeded five", invented)
 
 	var hdfcKind string
 	conn.QueryRow(`SELECT account_type FROM finance_accounts WHERE account_number = 'XXXXXXXX4125'`).
@@ -500,10 +490,10 @@ func TestPersistRealSampleEmails(t *testing.T) {
 	}
 }
 
-// The behaviour the whole change exists for: an alert naming an account nobody
-// registered is held, not guessed at. It must leave no link behind, so that
-// approving the account and syncing again imports its history.
-func TestUnknownAccountIsHeldForRetryNotInvented(t *testing.T) {
+// The behaviour the whole change exists for: an alert naming an account
+// nobody registered auto-creates one from the alert's own evidence, so a
+// mailbox with nothing configured still turns into a populated ledger.
+func TestUnknownAccountAutoCreatesItself(t *testing.T) {
 	samples := loadSamples(t)
 	conn := openDB(t)
 	accountID := seedIndex(t, conn, samples)
@@ -514,35 +504,36 @@ func TestUnknownAccountIsHeldForRetryNotInvented(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first pass: %v", err)
 	}
-	if first.PendingAccount == 0 {
-		t.Fatal("nothing was held pending; the samples do name accounts")
-	}
-	if first.Transactions != 0 || first.Bills != 0 || first.Balances != 0 {
-		t.Errorf("imported %d txns / %d bills / %d balances with no accounts registered",
-			first.Transactions, first.Bills, first.Balances)
+	if first.Transactions == 0 && first.Bills == 0 && first.Balances == 0 {
+		t.Fatal("nothing was imported with no accounts registered — auto-creation did not run")
 	}
 
 	var accounts int
 	conn.QueryRow(`SELECT COUNT(*) FROM finance_accounts`).Scan(&accounts)
-	if accounts != 0 {
-		t.Errorf("ingest created %d accounts, want 0", accounts)
+	if accounts == 0 {
+		t.Error("ingest created 0 accounts — the samples do name accounts")
+	}
+	var nonEmail int
+	conn.QueryRow(`SELECT COUNT(*) FROM finance_accounts WHERE source != 'email'`).Scan(&nonEmail)
+	if nonEmail != 0 {
+		t.Errorf("%d auto-created accounts have source != 'email'", nonEmail)
 	}
 
-	// Now the user approves the accounts and syncs again. The held mail must
-	// be picked up — if pending messages had been linked, this would import
-	// nothing and the history would be lost silently.
-	seedAccounts(t, conn)
+	// Re-running must not double-import against the accounts it just created.
 	second, err := Run(context.Background(), conn, fetcher, accountID, "INBOX")
 	if err != nil {
 		t.Fatalf("second pass: %v", err)
 	}
-	if second.Transactions+second.Bills+second.Balances == 0 {
-		t.Error("nothing imported after adding the accounts — held mail was not retried")
+	if second.Scanned != 0 {
+		t.Errorf("second pass scanned %d already-linked messages, want 0", second.Scanned)
 	}
-	if second.PendingAccount != 0 {
-		t.Errorf("%d still held after the accounts exist", second.PendingAccount)
+	var accountsAfter int
+	conn.QueryRow(`SELECT COUNT(*) FROM finance_accounts`).Scan(&accountsAfter)
+	if accountsAfter != accounts {
+		t.Errorf("second pass changed account count from %d to %d — must not create duplicates",
+			accounts, accountsAfter)
 	}
-	t.Logf("held then imported: %+v", *second)
+	t.Logf("auto-created then stable: %+v", *first)
 }
 
 // The HDFC balance-update sample states a balance the bank vouches for. It has

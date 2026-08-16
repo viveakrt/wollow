@@ -148,9 +148,12 @@ right, so alert mail is mined for four separate things:
   on the most recent one with only later transactions applied — so an account
   known solely from alert mail still shows a figure the bank agrees with.
 
-Institutions that mail you but have no account yet are listed on the Accounts
-page as **found in your mail**, one click from becoming a real one. That covers
-the wallets and brokers that never state an amount you could parse.
+An institution that mails you but has no account yet gets one created
+automatically the moment its mail names a real transaction, bill, or balance —
+nothing to approve first. It shows up on the Accounts page tagged **found in
+mail** so it stays distinguishable from one you entered by hand, and its type
+is a one-time guess from that first message: later mail never rewrites it, so
+a correction you make sticks.
 
 Deposits and holdings — fixed deposits, PPF, mutual funds, stocks — live in
 `investments` rather than `finance_accounts`, because the facts that matter are
