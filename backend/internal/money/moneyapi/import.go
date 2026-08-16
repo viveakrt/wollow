@@ -5,6 +5,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
+
+	"wollow/backend/internal/money/ledger"
 	"wollow/backend/internal/platform/httpx"
 
 	"wollow/backend/internal/money/models"
@@ -12,8 +15,13 @@ import (
 )
 
 type importPreviewResponse struct {
+	// Kind routes the client to the right confirm step: "statement" for a
+	// transaction export, "deposits" for an FD/RD summary. One upload endpoint
+	// handles both because the user just has a file, not a taxonomy.
+	Kind             string               `json:"kind"`
 	FileName         string               `json:"fileName"`
 	Bank             string               `json:"bank"`
+	AccountType      string               `json:"accountType"`
 	AccountNumber    string               `json:"accountNumber"`
 	AccountBranch    string               `json:"accountBranch"`
 	IFSC             string               `json:"ifsc"`
@@ -26,6 +34,8 @@ type importPreviewResponse struct {
 	DuplicateRows    int                  `json:"duplicateRows"`
 	SuggestedAccount *matchedAccount      `json:"suggestedAccount,omitempty"`
 	Transactions     []previewTransaction `json:"transactions"`
+	// Deposits is populated instead of Transactions when Kind is "deposits".
+	Deposits []models.ParsedDeposit `json:"deposits,omitempty"`
 }
 
 type matchedAccount struct {
@@ -70,6 +80,13 @@ func (s *Server) handleImportHDFCPreview(w http.ResponseWriter, r *http.Request)
 	}
 	defer os.Remove(tmpPath)
 
+	// An FD summary and an account statement arrive through the same upload,
+	// and the user has no reason to know they are parsed differently.
+	if parsers.IsDepositSummary(tmpPath) {
+		s.previewDepositSummary(w, tmpPath, fileName)
+		return
+	}
+
 	statement, err := parsers.ParseHDFCStatement(tmpPath)
 	if err != nil {
 		httpx.WriteError(w, 422, "could not parse statement: "+err.Error())
@@ -77,8 +94,10 @@ func (s *Server) handleImportHDFCPreview(w http.ResponseWriter, r *http.Request)
 	}
 
 	resp := importPreviewResponse{
+		Kind:           "statement",
 		FileName:       fileName,
 		Bank:           statement.Bank,
+		AccountType:    statement.AccountType,
 		AccountNumber:  statement.AccountNumber,
 		AccountBranch:  statement.AccountBranch,
 		IFSC:           statement.IFSC,
@@ -90,15 +109,7 @@ func (s *Server) handleImportHDFCPreview(w http.ResponseWriter, r *http.Request)
 		Transactions:   make([]previewTransaction, 0, len(statement.Transactions)),
 	}
 
-	// Try to find an existing account by masked account number suffix.
-	if statement.AccountNumber != "" {
-		var acc matchedAccount
-		err := s.DB.QueryRow(`SELECT id, name FROM finance_accounts WHERE account_number = ? LIMIT 1`,
-			statement.AccountNumber).Scan(&acc.ID, &acc.Name)
-		if err == nil {
-			resp.SuggestedAccount = &acc
-		}
-	}
+	resp.SuggestedAccount = s.matchStatementAccount(statement.AccountNumber)
 
 	for _, t := range statement.Transactions {
 		isDup := false
@@ -124,11 +135,197 @@ func (s *Server) handleImportHDFCPreview(w http.ResponseWriter, r *http.Request)
 	httpx.WriteJSON(w, 200, resp)
 }
 
+// matchStatementAccount finds the account a statement belongs to.
+//
+// An exact number match is tried first, then the last four digits — because the
+// account this statement is for very often already exists as a row alert ingest
+// created, and that row only ever knew the masked tail ("XXXXXXXX4125"). Without
+// the suffix arm the import offers to create a *second* account for the same
+// bank account, and the balance ends up split across both.
+func (s *Server) matchStatementAccount(accountNumber string) *matchedAccount {
+	accountNumber = strings.TrimSpace(accountNumber)
+	if accountNumber == "" {
+		return nil
+	}
+
+	var acc matchedAccount
+	if err := s.DB.QueryRow(
+		`SELECT id, name FROM finance_accounts WHERE account_number = ? ORDER BY id LIMIT 1`,
+		accountNumber,
+	).Scan(&acc.ID, &acc.Name); err == nil {
+		return &acc
+	}
+
+	if len(accountNumber) < 4 {
+		return nil
+	}
+	last4 := accountNumber[len(accountNumber)-4:]
+	if err := s.DB.QueryRow(
+		`SELECT id, name FROM finance_accounts
+		 WHERE account_number LIKE '%' || ? AND account_number != '' ORDER BY id LIMIT 1`,
+		last4,
+	).Scan(&acc.ID, &acc.Name); err != nil {
+		return nil
+	}
+	return &acc
+}
+
+// previewDepositSummary answers the upload with the holdings a deposit summary
+// describes, marking the ones already on file so a re-import reads as a refresh
+// rather than a duplication.
+func (s *Server) previewDepositSummary(w http.ResponseWriter, tmpPath, fileName string) {
+	summary, err := parsers.ParseDepositSummary(tmpPath, "HDFC")
+	if err != nil {
+		httpx.WriteError(w, 422, "could not parse deposit summary: "+err.Error())
+		return
+	}
+
+	resp := importPreviewResponse{
+		Kind:        "deposits",
+		FileName:    fileName,
+		Bank:        summary.Institution,
+		AccountType: "investment",
+		TotalRows:   len(summary.Deposits),
+		Deposits:    summary.Deposits,
+	}
+	for i := range resp.Deposits {
+		var existing int
+		s.DB.QueryRow(`SELECT COUNT(*) FROM investments WHERE dedupe_key = ?`,
+			resp.Deposits[i].DedupeKey).Scan(&existing)
+		resp.Deposits[i].IsDuplicate = existing > 0
+		if existing > 0 {
+			resp.DuplicateRows++
+		} else {
+			resp.NewRows++
+		}
+	}
+	httpx.WriteJSON(w, 200, resp)
+}
+
+type importDepositsRequest struct {
+	FileName string                 `json:"fileName"`
+	Deposits []models.ParsedDeposit `json:"deposits"`
+}
+
+// handleImportDepositsCommit writes a parsed deposit summary into investments.
+//
+// Rows already on file are updated rather than skipped: a summary export is a
+// snapshot of the whole portfolio, so re-importing a newer one is how a
+// deposit's principal (which grows with interest) stays current.
+func (s *Server) handleImportDepositsCommit(w http.ResponseWriter, r *http.Request) {
+	var req importDepositsRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, 400, "invalid body")
+		return
+	}
+	if len(req.Deposits) == 0 {
+		httpx.WriteError(w, 400, "deposits is required and must be non-empty")
+		return
+	}
+
+	tx, err := s.DB.Begin()
+	if err != nil {
+		httpx.WriteError(w, 500, err.Error())
+		return
+	}
+	defer tx.Rollback()
+
+	imported, updated := 0, 0
+	for _, d := range req.Deposits {
+		// Whether this row is new has to be established before the upsert:
+		// last_insert_rowid() is left untouched by the DO UPDATE branch, so
+		// reading it back reports the *previous* insert's id and every update
+		// counts as an import.
+		var existing int64
+		tx.QueryRow(`SELECT id FROM investments WHERE dedupe_key = ? AND dedupe_key != ''`,
+			d.DedupeKey).Scan(&existing)
+
+		if _, err := tx.Exec(`
+			INSERT INTO investments
+				(kind, institution, name, identifier, currency, invested_amount, current_value,
+				 maturity_amount, interest_rate, start_date, maturity_date, status, source, dedupe_key)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'statement', ?)
+			-- The index on dedupe_key is partial (hand-entered holdings have no
+			-- key), and SQLite only matches a partial index when the conflict
+			-- target repeats its predicate.
+			ON CONFLICT(dedupe_key) WHERE dedupe_key != '' DO UPDATE SET
+				invested_amount = excluded.invested_amount,
+				current_value   = excluded.current_value,
+				maturity_amount = excluded.maturity_amount,
+				interest_rate   = excluded.interest_rate,
+				maturity_date   = excluded.maturity_date,
+				updated_at      = datetime('now')`,
+			d.Kind, d.Institution, d.Name, d.Identifier, defaultCurrency(d.Currency),
+			d.InvestedAmount, d.InvestedAmount, nullIfZeroAmount(d.MaturityAmount),
+			nullIfZeroAmount(d.InterestRate), d.StartDate, d.MaturityDate, d.DedupeKey,
+		); err != nil {
+			httpx.WriteError(w, 500, err.Error())
+			return
+		}
+		if existing == 0 {
+			imported++
+		} else {
+			updated++
+		}
+	}
+
+	if _, err := tx.Exec(`
+		INSERT INTO import_batches (file_name, bank, total_rows, imported_rows, duplicate_rows, status)
+		VALUES (?, 'HDFC', ?, ?, ?, 'done')`,
+		req.FileName, len(req.Deposits), imported, updated); err != nil {
+		httpx.WriteError(w, 500, err.Error())
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		httpx.WriteError(w, 500, err.Error())
+		return
+	}
+
+	httpx.WriteJSON(w, 200, map[string]int{"imported": imported, "updated": updated})
+}
+
+func defaultCurrency(c string) string {
+	if c == "" {
+		return "INR"
+	}
+	return c
+}
+
+// nullIfZeroAmount keeps "not reported" distinguishable from "reported as
+// zero" for the optional deposit figures.
+func nullIfZeroAmount(v float64) any {
+	if v == 0 {
+		return nil
+	}
+	return v
+}
+
 type importCommitRequest struct {
-	FileName     string               `json:"fileName"`
-	AccountID    int64                `json:"accountId"` // existing account, or 0 to create one
-	NewAccount   *models.Account      `json:"newAccount,omitempty"`
-	Transactions []previewTransaction `json:"transactions"`
+	FileName  string `json:"fileName"`
+	AccountID int64  `json:"accountId"` // existing account, or 0 to create one
+	// AccountNumber is the number the statement itself carried. Importing into
+	// an account discovered from alert mail is how the full number replaces the
+	// masked tail that was all the alerts ever disclosed.
+	AccountNumber string               `json:"accountNumber"`
+	NewAccount    *models.Account      `json:"newAccount,omitempty"`
+	Transactions  []previewTransaction `json:"transactions"`
+}
+
+// upgradeAccountNumber fills in the full account number on an account that only
+// ever knew its masked tail, and records where the row came from. It refuses to
+// overwrite a number that is already longer than the one offered, so importing
+// an older statement can't degrade what a newer one established.
+func upgradeAccountNumber(tx *sql.Tx, accountID int64, statementNumber string) {
+	statementNumber = strings.TrimSpace(statementNumber)
+	if accountID == 0 || statementNumber == "" {
+		return
+	}
+	tx.Exec(`
+		UPDATE finance_accounts
+		SET account_number = ?, source = 'statement', updated_at = datetime('now')
+		WHERE id = ? AND LENGTH(account_number) < ?`,
+		statementNumber, accountID, len(statementNumber))
 }
 
 func (s *Server) handleImportHDFCCommit(w http.ResponseWriter, r *http.Request) {
@@ -178,6 +375,8 @@ func (s *Server) handleImportHDFCCommit(w http.ResponseWriter, r *http.Request) 
 	}
 	batchID, _ := batchRes.LastInsertId()
 
+	upgradeAccountNumber(tx, accountID, req.AccountNumber)
+
 	imported, duplicates := 0, 0
 	for _, t := range req.Transactions {
 		categoryID := lookupCategoryID(tx, t.SuggestedCategory)
@@ -209,7 +408,7 @@ func (s *Server) handleImportHDFCCommit(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if err := recomputeAccountBalance(tx, accountID); err != nil {
+	if err := ledger.RecomputeAccountBalance(tx, accountID); err != nil {
 		httpx.WriteError(w, 500, err.Error())
 		return
 	}

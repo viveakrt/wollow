@@ -1,14 +1,29 @@
 services:
   backend:
     build: ./backend
+    # Deliberately not published to the host: the frontend container proxies
+    # /api to it over the compose network, so the browser only ever talks to
+    # one origin and the session cookie needs no CORS grant. Publishing 8080
+    # would expose a second origin for the same API with nothing gained.
+    expose:
+      - "8080"
     environment:
       - WOLLOW_MASTER_KEY=${WOLLOW_MASTER_KEY}
       - WOLLOW_ADMIN_PASSWORD=${WOLLOW_ADMIN_PASSWORD}
       - WOLLOW_JWT_SECRET=${WOLLOW_JWT_SECRET}
       - WOLLOW_COOKIE_SECURE=${WOLLOW_COOKIE_SECURE:-false}
+      - WOLLOW_ALLOWED_ORIGINS=${WOLLOW_ALLOWED_ORIGINS:-}
       - WOLLOW_CLASSIFY_CONCURRENCY=${WOLLOW_CLASSIFY_CONCURRENCY:-3}
     volumes:
       - wollow-data:/data
+    healthcheck:
+      # /api/health is public and pings the database, so an unhealthy mark
+      # means the storage is broken, not merely that nobody has logged in.
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
 
   frontend:
@@ -17,7 +32,8 @@ services:
     ports:
       - "${WOLLOW_PORT:-8081}:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test:e2e": "node e2e/smoke.mjs"
+    "test:e2e": "node e2e/smoke.mjs",
+    "test:e2e:links": "node e2e/links.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",

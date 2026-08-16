@@ -32,6 +32,11 @@ type Classification struct {
 type Provider interface {
 	Summarize(ctx context.Context, subject, bodyPreview string) (string, error)
 	Classify(ctx context.Context, subject, from, snippet string) (*Classification, error)
+	// Complete runs one free-form prompt and returns the raw model text. It
+	// exists so other products (Money's transaction categorizer) can reuse the
+	// user's configured provider without this package having to know their
+	// prompt shapes.
+	Complete(ctx context.Context, prompt string, maxTokens int) (string, error)
 }
 
 const MaxBodyPreviewChars = 4000

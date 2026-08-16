@@ -5,6 +5,7 @@ import {
   CornerUpLeft,
   Inbox,
   Landmark,
+  Mail,
   Megaphone,
   Newspaper,
   Package,
@@ -105,6 +106,20 @@ export function Sidebar({
             onClick={() => onSelectView(view.id)}
           />
         ))}
+
+        <p className="mt-4 px-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-[var(--color-text-subtle)]">
+          Browse
+        </p>
+        <Link
+          to="/mail/senders"
+          className={clsx(
+            'flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-sm transition-colors',
+            'text-[var(--color-text-muted)] hover:bg-[var(--color-hover)] hover:text-[var(--color-text)]',
+          )}
+        >
+          <Mail size={15} />
+          <span>Senders</span>
+        </Link>
 
         <p className="mt-4 px-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-[var(--color-text-subtle)]">
           Mailboxes

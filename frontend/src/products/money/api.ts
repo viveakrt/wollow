@@ -2,11 +2,18 @@ import { api as http } from '../../platform/api/client'
 import type {
   Account,
   Category,
+  ClassifyStatus,
   Transaction,
   DashboardSummary,
   ImportPreview,
+  Institution,
+  Investment,
+  InvestmentSummary,
+  InvestmentTrade,
+  ParsedDeposit,
   EmailAccount,
   Bill,
+  FXRate,
   SyncResult,
   TransferSuggestion,
   PDFPassword,
@@ -44,6 +51,25 @@ export const api = {
     delete: (id: number) => http.delete<void>(`${BASE}/accounts/${id}`),
     bulkDelete: (ids: number[]) => http.post<{ deleted: number }>(`${BASE}/accounts/bulk-delete`, { ids }),
   },
+  // The senders Money can attribute mail to. The add-account form offers these
+  // so a hand-entered account stores the issuer code alerts match against.
+  institutions: {
+    list: () => http.get<Institution[]>(`${BASE}/institutions`),
+  },
+  investments: {
+    list: (params?: Record<string, string | undefined>) =>
+      http.get<Investment[]>(`${BASE}/investments`, params),
+    summary: () => http.get<InvestmentSummary>(`${BASE}/investments/summary`),
+    create: (data: Partial<Investment>) => http.post<Investment>(`${BASE}/investments`, data),
+    update: (id: number, data: Partial<Investment>) =>
+      http.put<Investment>(`${BASE}/investments/${id}`, data),
+    delete: (id: number) => http.delete<void>(`${BASE}/investments/${id}`),
+    // The orders that built a position — the evidence behind its average cost.
+    trades: (id: number) => http.get<InvestmentTrade[]>(`${BASE}/investments/${id}/trades`),
+    // Money has no market feed, so a holding is valued by entering its price.
+    setPrice: (id: number, price: number, asOf?: string) =>
+      http.post<Investment>(`${BASE}/investments/${id}/price`, { price, asOf }),
+  },
   categories: {
     list: () => http.get<Category[]>(`${BASE}/categories`),
     create: (data: Partial<Category>) => http.post<Category>(`${BASE}/categories`, data),
@@ -58,8 +84,34 @@ export const api = {
     delete: (id: number) => http.delete<void>(`${BASE}/transactions/${id}`),
     bulkDelete: (ids: number[]) =>
       http.post<{ deleted: number }>(`${BASE}/transactions/bulk-delete`, { ids }),
+    // The category also applies to every other transaction sharing these
+    // narrations; `matched` is how many extra rows that covered.
     bulkCategorize: (ids: number[], categoryId: number | null) =>
-      http.post<{ updated: number }>(`${BASE}/transactions/bulk-categorize`, { ids, categoryId }),
+      http.post<{ updated: number; matched: number }>(`${BASE}/transactions/bulk-categorize`, {
+        ids,
+        categoryId,
+      }),
+    // Reclassify rows as transfers of a kind: 'self' between own accounts,
+    // 'investment' into a holding, 'family' to a family member.
+    bulkMarkTransfer: (ids: number[], kind: string, counterparty = '') =>
+      http.post<{ updated: number }>(`${BASE}/transactions/bulk-mark-transfer`, {
+        ids,
+        kind,
+        counterparty,
+      }),
+    // AI classification runs detached — one model call per transaction — so
+    // starting it returns immediately and the client polls the status.
+    // Passing ids re-classifies exactly those; omitting them covers every
+    // transaction never classified before.
+    classify: (ids?: number[]) =>
+      http.post<{ started: boolean }>(`${BASE}/transactions/classify`, { ids: ids ?? [] }),
+    classifyStatus: () => http.get<ClassifyStatus>(`${BASE}/transactions/classify/status`),
+    // Write a stored suggestion through to the transaction, including the
+    // type/transfer change the background pass deliberately leaves alone.
+    applyClassification: (id: number) =>
+      http.post<{ applied: boolean }>(`${BASE}/transactions/${id}/apply-classification`),
+    dismissClassification: (id: number) =>
+      http.post<{ dismissed: boolean }>(`${BASE}/transactions/${id}/dismiss-classification`),
     linkTransfer: (txnIdA: number, txnIdB: number) =>
       http.post<{ linked: boolean }>(`${BASE}/transactions/link-transfer`, { txnIdA, txnIdB }),
     unlinkTransfer: (id: number) =>
@@ -78,18 +130,33 @@ export const api = {
       http.get<DashboardSummary>(`${BASE}/dashboard/summary`, { from, to }),
   },
   import: {
-    hdfcPreview: (file: File) => upload<ImportPreview>('/import/hdfc/preview', file),
+    // One upload for any supported file; the response's `kind` says which
+    // commit step applies.
+    preview: (file: File) => upload<ImportPreview>('/import/hdfc/preview', file),
     hdfcCommit: (payload: unknown) =>
       http.post<{ batchId: number; accountId: number; importedRows: number; duplicateRows: number }>(
         `${BASE}/import/hdfc/commit`,
         payload,
       ),
+    depositsCommit: (fileName: string, deposits: ParsedDeposit[]) =>
+      http.post<{ imported: number; updated: number }>(`${BASE}/import/deposits/commit`, {
+        fileName,
+        deposits,
+      }),
   },
   // Mailboxes are connected and removed on the Mail side — one credential
   // store, and a "disconnect" here would discard the whole message index.
   emailAccounts: {
     list: () => http.get<EmailAccount[]>(`${BASE}/email-accounts`),
     sync: (id: number) => http.post<SyncResult>(`${BASE}/email-accounts/${id}/sync`),
+  },
+  // Exchange rates that bring foreign holdings into the rupee net worth.
+  // Either the user set one, or it was derived from their own forex
+  // remittances; nothing here is fetched from a market feed.
+  fxRates: {
+    list: () => http.get<FXRate[]>(`${BASE}/fx-rates`),
+    set: (currency: string, inrPerUnit: number, asOf?: string) =>
+      http.post<{ saved: boolean }>(`${BASE}/fx-rates`, { currency, inrPerUnit, asOf }),
   },
   bills: {
     list: () => http.get<Bill[]>(`${BASE}/bills`),

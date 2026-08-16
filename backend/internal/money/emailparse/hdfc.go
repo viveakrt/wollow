@@ -4,7 +4,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"wollow/backend/internal/money/models"
 )
@@ -46,15 +45,13 @@ func parseAmountCommas(s string) float64 {
 	return v
 }
 
+// parseFlexDate normalizes an alert's date to YYYY-MM-DD, or returns "" when
+// none of the known layouts fit. Returning "" rather than the raw string is
+// deliberate: a half-parsed date written into transactions.txn_date sorts
+// nowhere and breaks every date-scoped query, so callers substitute the
+// message's own received date instead.
 func parseFlexDate(s string) string {
-	s = strings.TrimSpace(s)
-	layouts := []string{"02-Jan-06", "02-Jan-2006", "02-01-06", "02-01-2006"}
-	for _, l := range layouts {
-		if t, err := time.Parse(l, s); err == nil {
-			return t.Format("2006-01-02")
-		}
-	}
-	return s
+	return ParseAlertDate(s)
 }
 
 // ParseHDFCEmail attempts to extract a transaction from an HDFC alert email
@@ -105,10 +102,4 @@ func ParseHDFCEmail(subject, body string) (*models.ParsedEmailTransaction, bool)
 	}
 
 	return nil, false
-}
-
-// IsHDFCBalanceUpdate reports whether the email is a pure balance snapshot
-// (not an actionable transaction) so callers can skip/record it separately.
-func IsHDFCBalanceUpdate(body string) bool {
-	return hdfcBalanceRe.MatchString(body)
 }

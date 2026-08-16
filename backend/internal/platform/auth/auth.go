@@ -42,10 +42,17 @@ func (a *Authenticator) IssueToken() (string, error) {
 	return token.SignedString(a.jwtSecret)
 }
 
+// VerifyToken checks a session token's signature and expiry.
+//
+// The accepted algorithm is pinned to the one IssueToken uses. Without that,
+// the parser would accept any algorithm the token itself names, which is the
+// classic JWT confusion bug: a token could dictate how it gets verified.
 func (a *Authenticator) VerifyToken(tokenStr string) error {
-	_, err := jwt.ParseWithClaims(tokenStr, &jwt.RegisteredClaims{}, func(t *jwt.Token) (interface{}, error) {
-		return a.jwtSecret, nil
-	})
+	_, err := jwt.ParseWithClaims(tokenStr, &jwt.RegisteredClaims{},
+		func(t *jwt.Token) (interface{}, error) { return a.jwtSecret, nil },
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithExpirationRequired(),
+	)
 	return err
 }
 
@@ -73,12 +80,18 @@ func SetSessionCookie(w http.ResponseWriter, token string, secure bool) {
 	})
 }
 
-func ClearSessionCookie(w http.ResponseWriter) {
+// ClearSessionCookie expires the session cookie. The attributes must match
+// SetSessionCookie's — a browser treats a Secure cookie and a non-Secure one of
+// the same name as different cookies, so a mismatched clear leaves the original
+// in place and logout silently fails.
+func ClearSessionCookie(w http.ResponseWriter, secure bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     CookieName,
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})
 }

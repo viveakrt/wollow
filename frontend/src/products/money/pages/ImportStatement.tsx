@@ -5,6 +5,7 @@ import { Upload, FileSpreadsheet, CheckCircle2, AlertCircle, Loader2 } from 'luc
 import { api } from '../api'
 import { formatINR, formatDate } from '../lib/format'
 import { Card } from '../components/Card'
+import { ACCOUNT_TYPE_LABELS } from '../types'
 import type { ImportPreview } from '../types'
 
 type Step = 'upload' | 'review' | 'done'
@@ -20,8 +21,11 @@ export function ImportStatement() {
   const [preview, setPreview] = useState<ImportPreview | null>(null)
   const [selectedAccountId, setSelectedAccountId] = useState<string>('')
   const [newAccountName, setNewAccountName] = useState('')
+  const [newAccountType, setNewAccountType] = useState('bank')
   const [committing, setCommitting] = useState(false)
-  const [result, setResult] = useState<{ importedRows: number; duplicateRows: number } | null>(null)
+  const [result, setResult] = useState<{ importedRows: number; duplicateRows: number; noun: string } | null>(
+    null,
+  )
   const fileInputRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
 
@@ -34,15 +38,18 @@ export function ImportStatement() {
     setError(null)
     setUploading(true)
     try {
-      const p = await api.import.hdfcPreview(file)
+      const p = await api.import.preview(file)
       setPreview(p)
       setSelectedAccountId(p.suggestedAccount ? String(p.suggestedAccount.id) : '')
       if (!p.suggestedAccount) {
-        setNewAccountName(`HDFC •• ${p.accountNumber.slice(-4)}`)
+        setNewAccountName(`${p.bank} •• ${p.accountNumber.slice(-4)}`)
       }
+      // The parser reads a PPF passbook out of the same template as a savings
+      // export; its guess seeds the picker and the user can override it.
+      setNewAccountType(p.accountType || 'bank')
       setStep('review')
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to parse statement')
+      setError(e instanceof Error ? e.message : 'Failed to parse file')
     } finally {
       setUploading(false)
     }
@@ -53,17 +60,31 @@ export function ImportStatement() {
     setCommitting(true)
     setError(null)
     try {
+      // A deposit summary has no account to import into and no transactions to
+      // dedupe — it replaces the holdings it names outright.
+      if (preview.kind === 'deposits') {
+        const res = await api.import.depositsCommit(preview.fileName, preview.deposits ?? [])
+        setResult({ importedRows: res.imported, duplicateRows: res.updated, noun: 'holding' })
+        setStep('done')
+        queryClient.invalidateQueries({ queryKey: ['money'] })
+        return
+      }
+
       const payload: Record<string, unknown> = {
         fileName: preview.fileName,
+        // Sent even when importing into an existing account: an account added
+        // by hand usually knows only its masked tail, and this is where it
+        // learns the full number.
+        accountNumber: preview.accountNumber,
         transactions: preview.transactions,
       }
       if (selectedAccountId) {
         payload.accountId = Number(selectedAccountId)
       } else {
         payload.newAccount = {
-          name: newAccountName || `HDFC •• ${preview.accountNumber.slice(-4)}`,
-          bank: 'HDFC',
-          accountType: 'bank',
+          name: newAccountName || `${preview.bank} •• ${preview.accountNumber.slice(-4)}`,
+          bank: preview.bank,
+          accountType: newAccountType,
           accountNumber: preview.accountNumber,
           ifsc: preview.ifsc,
           branch: preview.accountBranch,
@@ -71,24 +92,27 @@ export function ImportStatement() {
         }
       }
       const res = await api.import.hdfcCommit(payload)
-      setResult(res)
+      setResult({ ...res, noun: 'transaction' })
       setStep('done')
       // A commit creates transactions and possibly a new account, so the
       // dashboard, account list and transaction list are all stale.
       queryClient.invalidateQueries({ queryKey: ['money'] })
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to import transactions')
+      setError(e instanceof Error ? e.message : 'Failed to import')
     } finally {
       setCommitting(false)
     }
   }
+
+  const isDeposits = preview?.kind === 'deposits'
 
   return (
     <div className="p-8 max-w-4xl mx-auto">
       <div className="mb-6">
         <h1 className="text-2xl font-semibold tracking-tight">Import Statement</h1>
         <p className="text-[var(--color-text-muted)] text-sm mt-1">
-          Upload an HDFC Bank .xls statement export to import transactions automatically.
+          Upload an HDFC Bank .xls export — an account or PPF statement becomes transactions, a
+          fixed-deposit summary becomes holdings. Which is which is worked out from the file.
         </p>
       </div>
 
@@ -121,9 +145,9 @@ export function ImportStatement() {
             ) : (
               <>
                 <Upload size={36} className="text-[var(--color-text-muted)] mb-4" />
-                <p className="font-medium mb-1">Drag & drop your statement here</p>
+                <p className="font-medium mb-1">Drag &amp; drop your statement here</p>
                 <p className="text-sm text-[var(--color-text-muted)]">
-                  or click to browse — supports HDFC .xls exports
+                  or click to browse — HDFC account, PPF and FD summary .xls exports
                 </p>
               </>
             )}
@@ -141,7 +165,88 @@ export function ImportStatement() {
         </Card>
       )}
 
-      {step === 'review' && preview && (
+      {step === 'review' && preview && isDeposits && (
+        <div className="mt-5 space-y-5">
+          <Card>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <SummaryStat label="File" value={preview.bank + ' deposits'} />
+              <SummaryStat label="Deposits Found" value={String(preview.totalRows)} />
+              <SummaryStat label="New" value={String(preview.newRows)} positive />
+              <SummaryStat label="Already Tracked" value={String(preview.duplicateRows)} muted />
+            </div>
+            <p className="mt-4 border-t border-[var(--color-border)] pt-4 text-sm text-[var(--color-text-muted)]">
+              Deposits already tracked are refreshed rather than duplicated — a summary export is a
+              snapshot of the whole portfolio, so re-importing a newer one is how principal and
+              maturity figures stay current.
+            </p>
+          </Card>
+
+          <Card title={`Preview (${preview.deposits?.length ?? 0} deposits)`}>
+            <div className="max-h-96 overflow-y-auto rounded-lg border border-[var(--color-border)]">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-[var(--color-surface-2)]">
+                  <tr className="text-xs uppercase text-[var(--color-text-muted)]">
+                    <th className="px-3 py-2 text-left font-medium">Account</th>
+                    <th className="px-3 py-2 text-right font-medium">Principal</th>
+                    <th className="px-3 py-2 text-right font-medium">At maturity</th>
+                    <th className="px-3 py-2 text-right font-medium">Rate</th>
+                    <th className="px-3 py-2 text-left font-medium">Matures</th>
+                    <th className="w-20 px-3 py-2 text-left font-medium">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(preview.deposits ?? []).map((d) => (
+                    <tr key={d.dedupeKey} className="border-t border-[var(--color-border)]">
+                      <td className="px-3 py-2">
+                        <div>{d.identifier}</div>
+                        <div className="text-xs text-[var(--color-text-muted)]">{d.branch}</div>
+                      </td>
+                      <td className="px-3 py-2 text-right">{formatINR(d.investedAmount)}</td>
+                      <td className="px-3 py-2 text-right">{formatINR(d.maturityAmount)}</td>
+                      <td className="px-3 py-2 text-right text-[var(--color-text-muted)]">
+                        {d.interestRate}%
+                      </td>
+                      <td className="px-3 py-2 whitespace-nowrap text-[var(--color-text-muted)]">
+                        {formatDate(d.maturityDate)}
+                      </td>
+                      <td className="px-3 py-2">
+                        {d.isDuplicate ? (
+                          <span className="rounded-full bg-[var(--color-hover)] px-2 py-0.5 text-xs text-[var(--color-text-muted)]">
+                            Update
+                          </span>
+                        ) : (
+                          <span className="rounded-full bg-[var(--color-positive-tint)] px-2 py-0.5 text-xs text-[var(--color-positive)]">
+                            New
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+
+          <div className="flex justify-end gap-3">
+            <button
+              onClick={() => setStep('upload')}
+              className="rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm font-medium hover:bg-[var(--color-hover)]"
+            >
+              Back
+            </button>
+            <button
+              onClick={handleCommit}
+              disabled={committing || preview.totalRows === 0}
+              className="flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {committing && <Loader2 size={16} className="animate-spin" />}
+              Save {preview.totalRows} holding{preview.totalRows !== 1 ? 's' : ''}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === 'review' && preview && !isDeposits && (
         <div className="mt-5 space-y-5">
           <Card>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">
@@ -166,12 +271,31 @@ export function ImportStatement() {
                 ))}
               </select>
               {!selectedAccountId && (
-                <input
-                  value={newAccountName}
-                  onChange={(e) => setNewAccountName(e.target.value)}
-                  placeholder="Account name"
-                  className="w-full mt-2 px-3 py-2 bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded-lg text-sm focus:outline-none focus:border-[var(--color-accent)]"
-                />
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  <input
+                    value={newAccountName}
+                    onChange={(e) => setNewAccountName(e.target.value)}
+                    placeholder="Account name"
+                    className="w-full px-3 py-2 bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded-lg text-sm focus:outline-none focus:border-[var(--color-accent)]"
+                  />
+                  <select
+                    value={newAccountType}
+                    onChange={(e) => setNewAccountType(e.target.value)}
+                    className="w-full px-3 py-2 bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded-lg text-sm focus:outline-none focus:border-[var(--color-accent)]"
+                  >
+                    {Object.entries(ACCOUNT_TYPE_LABELS).map(([value, label]) => (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {!selectedAccountId && preview.accountType === 'ppf' && (
+                <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                  This looks like a PPF passbook — deposits only, with credited interest — so PPF is
+                  preselected. Change it if that&rsquo;s wrong.
+                </p>
               )}
             </div>
           </Card>
@@ -248,8 +372,12 @@ export function ImportStatement() {
           <CheckCircle2 size={48} className="text-[var(--color-positive)] mx-auto mb-4" />
           <h2 className="text-lg font-semibold mb-1">Import complete</h2>
           <p className="text-sm text-[var(--color-text-muted)] mb-6">
-            Imported {result.importedRows} new transaction{result.importedRows !== 1 ? 's' : ''}
-            {result.duplicateRows > 0 && ` (skipped ${result.duplicateRows} duplicate${result.duplicateRows !== 1 ? 's' : ''})`}
+            Imported {result.importedRows} new {result.noun}
+            {result.importedRows !== 1 ? 's' : ''}
+            {result.duplicateRows > 0 &&
+              (result.noun === 'holding'
+                ? ` (refreshed ${result.duplicateRows} already tracked)`
+                : ` (skipped ${result.duplicateRows} duplicate${result.duplicateRows !== 1 ? 's' : ''})`)}
             .
           </p>
           <div className="flex justify-center gap-3">

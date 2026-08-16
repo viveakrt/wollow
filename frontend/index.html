@@ -6,14 +6,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>Wollow</title>
-    <script>
-      // Stamp the saved theme before first paint so an explicit dark choice
-      // doesn't flash the light palette on load.
-      try {
-        var t = localStorage.getItem('wollow.theme')
-        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t)
-      } catch (e) {}
-    </script>
+    <!-- Stamps the saved theme before first paint. External, not inline: the
+         app is served under `script-src 'self'`, which blocks inline scripts. -->
+    <script src="/theme-boot.js"></script>
   </head>
   <body>
     <div id="root"></div>

@@ -63,6 +63,20 @@ export const ACTION_LABELS: Record<string, string> = {
   unsubscribe: 'Unsubscribe',
 }
 
+/**
+ * What the Money product made of a message, when finance ingest has seen it.
+ * This is the Mail-side half of the cross-product link; the Money side is
+ * `sourceEmail` on a transaction.
+ */
+export interface MoneyLink {
+  parsedAs: 'transaction' | 'bill' | 'unrecognized'
+  transactionId?: number
+  billId?: number
+  amount?: number
+  dueDate?: string
+  issuer?: string
+}
+
 export interface MessageSummary {
   id: string
   subject: string
@@ -83,9 +97,31 @@ export interface MessageSummary {
   requiresResponse: boolean
   confidence?: number
   aiSummary?: string
+
+  moneyLink?: MoneyLink
+}
+
+/**
+ * One non-body MIME part. Content is never inlined in the message JSON — it is
+ * fetched separately by `partId`, so opening mail with a 20 MB PDF on it stays
+ * cheap.
+ */
+export interface Attachment {
+  partId: string
+  /** Content-ID without angle brackets — what an HTML body's `cid:` refers to. */
+  contentId?: string
+  fileName: string
+  contentType: string
+  size: number
+  /** Displayed within the body (cid: image) rather than offered as a download. */
+  inline: boolean
 }
 
 export interface Message extends MessageSummary {
+  to: string
+  cc: string
+  replyTo: string
   bodyText: string
   bodyHtml: string
+  attachments: Attachment[]
 }

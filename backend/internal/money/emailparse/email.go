@@ -67,7 +67,7 @@ func ParseEML(raw []byte) (*Email, error) {
 			return nil
 		}
 		ctype, params, _ := walkEntity.Header.ContentType()
-		disp, _, _ := walkEntity.Header.ContentDisposition()
+		disp, dispParams, _ := walkEntity.Header.ContentDisposition()
 
 		if strings.HasPrefix(ctype, "multipart/") {
 			// Walk recurses into multipart parts itself via MultipartReader,
@@ -76,13 +76,20 @@ func ParseEML(raw []byte) (*Email, error) {
 			return nil
 		}
 
-		isPDF := strings.Contains(strings.ToLower(ctype), "pdf") || strings.Contains(strings.ToLower(params["filename"]), ".pdf")
+		// The filename lives in Content-Disposition for most senders and in
+		// Content-Type's name= for older ones; some (BOBCARD) supply neither.
+		fileName := firstNonEmpty(dispParams["filename"], params["name"])
+		isPDF := strings.Contains(strings.ToLower(ctype), "pdf") ||
+			strings.HasSuffix(strings.ToLower(fileName), ".pdf")
 		if disp == "attachment" || isPDF {
 			if isPDF {
 				e.HasPDF = true
 				if body, readErr := io.ReadAll(walkEntity.Body); readErr == nil {
+					if fileName == "" {
+						fileName = "statement.pdf"
+					}
 					e.PDFAttachments = append(e.PDFAttachments, PDFAttachment{
-						FileName: params["filename"],
+						FileName: fileName,
 						Content:  body,
 					})
 				}
@@ -110,6 +117,15 @@ func ParseEML(raw []byte) (*Email, error) {
 	}
 
 	return e, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v = strings.TrimSpace(v); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func extractEmailAddress(s string) string {

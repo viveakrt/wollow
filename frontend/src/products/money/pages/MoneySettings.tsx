@@ -94,12 +94,27 @@ export function MoneySettings() {
                       : 'Never scanned for transactions'}
                   </div>
                   {lastSync?.id === account.id && (
-                    <div className="mt-1 flex items-center gap-1.5 text-xs text-[var(--color-positive)]">
-                      <CheckCircle2 size={12} />
-                      Found {lastSync.result.transactions} transaction
-                      {lastSync.result.transactions !== 1 ? 's' : ''}, {lastSync.result.bills} bill
-                      {lastSync.result.bills !== 1 ? 's' : ''} ({lastSync.result.scanned} emails scanned)
-                    </div>
+                    <>
+                      <div className="mt-1 flex items-center gap-1.5 text-xs text-[var(--color-positive)]">
+                        <CheckCircle2 size={12} />
+                        Found {lastSync.result.transactions} transaction
+                        {lastSync.result.transactions !== 1 ? 's' : ''}, {lastSync.result.bills} bill
+                        {lastSync.result.bills !== 1 ? 's' : ''} ({lastSync.result.scanned} emails scanned)
+                      </div>
+                      {/* Both of these used to be invisible, which is how a
+                          stalled import looked exactly like a finished one. */}
+                      {lastSync.result.pendingAccount > 0 && (
+                        <div className="mt-1 text-xs text-[var(--color-text-muted)]">
+                          {lastSync.result.pendingAccount} waiting for an account you haven't added
+                          yet — they'll import once you add it.
+                        </div>
+                      )}
+                      {lastSync.result.failed > 0 && (
+                        <div className="mt-1 text-xs text-[var(--color-tint-orange)]">
+                          {lastSync.result.failed} could not be read this time; they'll be retried.
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
                 <button

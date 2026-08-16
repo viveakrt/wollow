@@ -13,6 +13,22 @@ export function formatINR(amount: number, compact = false): string {
   }).format(amount)
 }
 
+/**
+ * Money in whichever currency it is actually held in.
+ *
+ * A US stock is priced in dollars; rendering it with a ₹ sign because the rest
+ * of the app is rupee-denominated states a number that is wrong by the
+ * exchange rate — about 85x — while looking perfectly ordinary.
+ */
+export function formatMoney(amount: number, currency = 'INR', compact = false): string {
+  if (currency === 'INR') return formatINR(amount, compact)
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency,
+    maximumFractionDigits: Math.abs(amount) >= 1000 ? 0 : 2,
+  }).format(amount)
+}
+
 export function formatDate(iso: string): string {
   if (!iso) return ''
   const d = new Date(iso)

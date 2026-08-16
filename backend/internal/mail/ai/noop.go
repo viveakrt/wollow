@@ -17,3 +17,7 @@ func (NoopProvider) Summarize(ctx context.Context, subject, bodyPreview string) 
 func (NoopProvider) Classify(ctx context.Context, subject, from, snippet string) (*Classification, error) {
 	return nil, ErrNotConfigured
 }
+
+func (NoopProvider) Complete(ctx context.Context, prompt string, maxTokens int) (string, error) {
+	return "", ErrNotConfigured
+}

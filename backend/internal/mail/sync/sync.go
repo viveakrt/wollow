@@ -165,10 +165,12 @@ func upsertMessages(database *sql.DB, accountID int64, folder string, messages [
 
 	stmt, err := tx.Prepare(`
 		INSERT INTO messages (
-			account_id, folder, uid, subject, from_name, from_email, from_domain,
-			date, seen, flagged, size, snippet, synced_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			account_id, folder, uid, rfc_message_id, subject, from_name, from_email,
+			from_domain, date, seen, flagged, size, snippet, synced_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(account_id, folder, uid) DO UPDATE SET
+			rfc_message_id = CASE WHEN excluded.rfc_message_id != ''
+				THEN excluded.rfc_message_id ELSE messages.rfc_message_id END,
 			subject = excluded.subject,
 			from_name = excluded.from_name,
 			from_email = excluded.from_email,
@@ -188,8 +190,8 @@ func upsertMessages(database *sql.DB, accountID int64, folder string, messages [
 	now := time.Now().UTC().Format(time.RFC3339)
 	for _, m := range messages {
 		if _, err := stmt.Exec(
-			accountID, folder, m.UID, m.Subject, m.FromName, m.FromEmail, m.FromDomain,
-			m.Date, boolToInt(m.Seen), boolToInt(m.Flagged), m.Size, m.Snippet, now,
+			accountID, folder, m.UID, m.RFCMessageID, m.Subject, m.FromName, m.FromEmail,
+			m.FromDomain, m.Date, boolToInt(m.Seen), boolToInt(m.Flagged), m.Size, m.Snippet, now,
 		); err != nil {
 			return err
 		}

@@ -30,33 +30,61 @@ var (
 	//   "... Credit Card Statement - <Month-Year>"
 	billSubjectPeriodRe = regexp.MustCompile(`for the period\s+(.+?to.+?\d{4})`)
 	billSubjectMonthRe  = regexp.MustCompile(`[-–]\s*([A-Za-z]+[- ]\d{4})\s*$`)
+
+	// The card product name sits between an optional "for your" lead-in and the
+	// word "statement": "Your HDFC Bank - Diners Privilege Credit Card
+	// Statement - June-2026" -> "Diners Privilege Credit Card".
+	billCardNameRe = regexp.MustCompile(`(?i)^(?:e-statement\s+)?(?:for\s+)?(?:your\s+)?(.{3,70}?)\s+(?:e-)?statement\b`)
 )
 
-var issuerSenderDomains = map[string]string{
-	"hdfcbank.bank.in": "HDFC",
-	"axis.bank.in":     "Axis",
-	"icici.bank.in":    "ICICI",
-	"bobcard.co.in":    "BOBCARD",
-}
+// billCardNameTrim are lead-ins that survive the capture and read as noise in
+// an account name.
+var billCardNameTrim = []string{"your ", "the ", "-", "–", ":"}
 
-// IssuerForSender maps a known bank/card sender domain to a display name,
-// or "" if the sender isn't recognized.
-func IssuerForSender(fromAddress string) string {
-	fromAddress = strings.ToLower(fromAddress)
-	for domain, issuer := range issuerSenderDomains {
-		if strings.HasSuffix(fromAddress, "@"+domain) || strings.Contains(fromAddress, "."+domain) {
-			return issuer
+// parseCardName pulls the card product out of a statement subject line.
+func parseCardName(subject string) string {
+	m := billCardNameRe.FindStringSubmatch(subject)
+	if m == nil {
+		return ""
+	}
+	name := strings.TrimSpace(m[1])
+	for changed := true; changed; {
+		changed = false
+		for _, prefix := range billCardNameTrim {
+			lower := strings.ToLower(name)
+			if strings.HasPrefix(lower, prefix) {
+				name = strings.TrimSpace(name[len(prefix):])
+				changed = true
+			}
 		}
 	}
-	return ""
+	name = strings.TrimRight(name, " -–:")
+	// A name that is just the issuer adds nothing over the issuer itself.
+	if len(name) < 4 {
+		return ""
+	}
+	return name
 }
 
 // IsBillEmail does a cheap subject-line check for statement/bill emails, to
 // distinguish them from transaction alerts before running the heavier
 // per-issuer transaction parsers.
+//
+// "Statement" alone is too eager: banks send "statement of account" summaries
+// and brokers send "holding statement", neither of which is a bill. The
+// qualifying words below are what make it a card statement carrying an amount
+// due.
 func IsBillEmail(subject string) bool {
 	lower := strings.ToLower(subject)
-	return strings.Contains(lower, "statement") || strings.Contains(lower, "e-statement")
+	if !strings.Contains(lower, "statement") {
+		return false
+	}
+	for _, negative := range []string{"holding statement", "portfolio statement", "statement of holdings"} {
+		if strings.Contains(lower, negative) {
+			return false
+		}
+	}
+	return true
 }
 
 // ParseBillEmail extracts what it can from a statement/bill email's subject
@@ -64,7 +92,7 @@ func IsBillEmail(subject string) bool {
 // record the bill reminder with whatever was found (e.g. just card+period)
 // so the user knows a statement arrived even if the PDF wasn't parsed.
 func ParseBillEmail(issuer, subject, body string) models.ParsedBillEmail {
-	b := models.ParsedBillEmail{Issuer: issuer}
+	b := models.ParsedBillEmail{Issuer: issuer, CardName: parseCardName(subject)}
 
 	if m := billCardLast4Re.FindStringSubmatch(subject); m != nil {
 		b.CardLast4 = m[1]

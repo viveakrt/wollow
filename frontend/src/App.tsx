@@ -5,6 +5,7 @@ import { LoginPage } from './pages/LoginPage'
 import { SettingsPage } from './pages/SettingsPage'
 
 import { InboxPage } from './products/mail/pages/InboxPage'
+import { SendersPage } from './products/mail/pages/SendersPage'
 import { MessageDetailPage } from './products/mail/pages/MessageDetailPage'
 import { ConnectAccountPage } from './products/mail/pages/ConnectAccountPage'
 
@@ -15,8 +16,8 @@ import { Transactions } from './products/money/pages/Transactions'
 import { ImportStatement } from './products/money/pages/ImportStatement'
 import { Bills } from './products/money/pages/Bills'
 import { Transfers } from './products/money/pages/Transfers'
+import { Investments } from './products/money/pages/Investments'
 import { MoneySettings } from './products/money/pages/MoneySettings'
-import { Placeholder } from './products/money/pages/Placeholder'
 
 /**
  * Mail manages its own full-height panes (account sidebar, message list, detail),
@@ -72,6 +73,7 @@ export default function App() {
         }
       >
         <Route path="/mail" element={<InboxPage />} />
+        <Route path="/mail/senders" element={<SendersPage />} />
         <Route path="/mail/accounts/new" element={<ConnectAccountPage />} />
         <Route path="/mail/messages/:accountId/:messageId" element={<MessageDetailPage />} />
       </Route>
@@ -90,12 +92,7 @@ export default function App() {
         <Route path="/money/bills" element={<Bills />} />
         <Route path="/money/import" element={<ImportStatement />} />
         <Route path="/money/settings" element={<MoneySettings />} />
-        <Route
-          path="/money/investments"
-          element={
-            <Placeholder title="Investments" note="Coming soon — track stocks, mutual funds & more." />
-          }
-        />
+        <Route path="/money/investments" element={<Investments />} />
       </Route>
 
       <Route

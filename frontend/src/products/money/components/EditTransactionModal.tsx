@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { X, Trash2, Loader2 } from 'lucide-react'
 import { api } from '../api'
+import { ClassificationPanel } from './ClassificationPanel'
+import { TRANSFER_KIND_LABELS } from '../types'
 import type { Account, Category, Transaction } from '../types'
 
 export function EditTransactionModal({
@@ -23,10 +25,17 @@ export function EditTransactionModal({
   const [narration, setNarration] = useState(transaction.narration)
   const [merchant, setMerchant] = useState(transaction.merchant)
   const [type, setType] = useState(transaction.type)
+  // A transfer can be either leg; whichever amount is set is the one to edit.
   const [amount, setAmount] = useState(
-    String(transaction.type === 'income' ? transaction.depositAmt : transaction.withdrawalAmt),
+    String(
+      transaction.type === 'income'
+        ? transaction.depositAmt
+        : transaction.withdrawalAmt || transaction.depositAmt,
+    ),
   )
   const [categoryId, setCategoryId] = useState(transaction.categoryId ? String(transaction.categoryId) : '')
+  const [transferKind, setTransferKind] = useState(transaction.transferKind || 'self')
+  const [counterparty, setCounterparty] = useState(transaction.counterparty || '')
   const [notes, setNotes] = useState(transaction.notes)
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
@@ -48,6 +57,10 @@ export function EditTransactionModal({
       return
     }
     setSaving(true)
+    // A transfer keeps the transaction's original direction: the money still
+    // left (or entered) this account, it just isn't income or spending.
+    const isOutflow =
+      type === 'expense' || (type === 'transfer' && transaction.depositAmt === 0)
     try {
       await api.transactions.update(transaction.id, {
         accountId,
@@ -56,9 +69,11 @@ export function EditTransactionModal({
         narration,
         merchant,
         type,
-        withdrawalAmt: type === 'expense' ? amt : 0,
-        depositAmt: type === 'income' ? amt : 0,
+        withdrawalAmt: isOutflow ? amt : 0,
+        depositAmt: isOutflow ? 0 : amt,
         categoryId: categoryId ? Number(categoryId) : undefined,
+        transferKind: type === 'transfer' ? transferKind : undefined,
+        counterparty: type === 'transfer' ? counterparty : undefined,
         notes,
       })
       onSaved()
@@ -154,16 +169,42 @@ export function EditTransactionModal({
             <input value={narration} onChange={(e) => setNarration(e.target.value)} className={inputClass} />
           </Field>
 
-          <Field label="Category">
-            <select value={categoryId} onChange={(e) => setCategoryId(e.target.value)} className={inputClass}>
-              <option value="">Uncategorized</option>
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </Field>
+          {type === 'transfer' ? (
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Transfer kind">
+                <select
+                  value={transferKind}
+                  onChange={(e) => setTransferKind(e.target.value)}
+                  className={inputClass}
+                >
+                  {Object.entries(TRANSFER_KIND_LABELS).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="To whom / where">
+                <input
+                  value={counterparty}
+                  onChange={(e) => setCounterparty(e.target.value)}
+                  placeholder="e.g. Mom, Zerodha"
+                  className={inputClass}
+                />
+              </Field>
+            </div>
+          ) : (
+            <Field label="Category">
+              <select value={categoryId} onChange={(e) => setCategoryId(e.target.value)} className={inputClass}>
+                <option value="">Uncategorized</option>
+                {categories.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
 
           <Field label="Notes">
             <textarea
@@ -173,6 +214,8 @@ export function EditTransactionModal({
               className={inputClass}
             />
           </Field>
+
+          <ClassificationPanel transaction={transaction} onApplied={onSaved} />
         </div>
 
         <div className="flex items-center justify-between mt-6">

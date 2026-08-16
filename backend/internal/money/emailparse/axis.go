@@ -25,7 +25,11 @@ import (
 const AxisSenderDomain = "axis.bank.in"
 
 var (
-	axisAmountRe   = regexp.MustCompile(`Transaction Amount:\s*INR\s*([\d,]+\.\d{2})`)
+	// Axis writes the amount as "INR 1018" — a non-breaking space, and no
+	// decimals. Requiring "\.\d{2}" here meant the body never matched and every
+	// Axis alert fell through to the subject-line fallback, losing the
+	// merchant, date and limit the body carried.
+	axisAmountRe   = regexp.MustCompile(`(?i)Transaction Amount:\s*INR[\s\x{00a0}]*([\d,]+(?:\.\d{1,2})?)`)
 	axisMerchantRe = regexp.MustCompile(`Merchant Name:\s*([^\n]+)`)
 	axisCardRe     = regexp.MustCompile(`Credit Card No\.?\s*(?:XX)?(\d{2,6})`)
 	axisDateTimeRe = regexp.MustCompile(`Date\s*&\s*Time:\s*([\d]{1,2}-[\d]{1,2}-\d{4}),?\s*(\d{1,2}:\d{2}:\d{2})?`)

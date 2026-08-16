@@ -30,11 +30,13 @@ type insightCount struct {
 }
 
 type insightSender struct {
-	Email    string `json:"email"`
-	Name     string `json:"name"`
-	Domain   string `json:"domain"`
-	Count    int    `json:"count"`
-	LastSeen string `json:"lastSeen"`
+	Email             string `json:"email"`
+	Name              string `json:"name"`
+	Domain            string `json:"domain"`
+	Count             int    `json:"count"`
+	LastSeen          string `json:"lastSeen"`
+	UnsubscribedAt    string `json:"unsubscribedAt,omitempty"`
+	UnsubscribeMethod string `json:"unsubscribeMethod,omitempty"`
 }
 
 func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
@@ -106,6 +108,49 @@ func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+// handleListSenders returns all unique senders in a mailbox sorted by message count.
+func (s *Server) handleListSenders(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid account id")
+		return
+	}
+	folder := r.URL.Query().Get("folder")
+	if folder == "" {
+		folder = "INBOX"
+	}
+
+	rows, err := s.DB.Query(`
+		SELECT m.from_email,
+		       COALESCE(MAX(m.from_name), ''),
+		       COALESCE(MAX(m.from_domain), ''),
+		       COUNT(*) AS n,
+		       MAX(m.date),
+		       COALESCE(ss.unsubscribed_at, ''),
+		       COALESCE(ss.unsubscribe_method, '')
+		FROM messages m
+		LEFT JOIN sender_status ss ON ss.account_id = m.account_id AND ss.from_email = m.from_email
+		WHERE m.account_id = ? AND m.folder = ? AND m.from_email != ''
+		GROUP BY m.from_email
+		ORDER BY n DESC`, id, folder)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "failed to list senders")
+		return
+	}
+	defer rows.Close()
+
+	senders := []insightSender{}
+	for rows.Next() {
+		var s insightSender
+		if err := rows.Scan(&s.Email, &s.Name, &s.Domain, &s.Count, &s.LastSeen,
+			&s.UnsubscribedAt, &s.UnsubscribeMethod); err == nil {
+			senders = append(senders, s)
+		}
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, senders)
 }
 
 func (s *Server) groupCount(accountID int64, folder, column string) []insightCount {

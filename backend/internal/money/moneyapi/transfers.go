@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"wollow/backend/internal/money/ledger"
 	"wollow/backend/internal/platform/httpx"
 
 	"wollow/backend/internal/money/models"
@@ -140,11 +141,7 @@ func (s *Server) handleListTransferSuggestions(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) getTransactionByID(id int64) (models.Transaction, error) {
-	query := fmt.Sprintf(`
-		SELECT %s FROM transactions t
-		JOIN finance_accounts a ON a.id = t.account_id
-		LEFT JOIN categories c ON c.id = t.category_id
-		WHERE t.id = ?`, txnSelectCols)
+	query := fmt.Sprintf(`SELECT %s %s WHERE t.id = ?`, txnSelectCols, txnSelectJoins)
 	return scanTxn(s.DB.QueryRow(query, id))
 }
 
@@ -244,8 +241,8 @@ func (s *Server) handleUnlinkTransfer(w http.ResponseWriter, r *http.Request) {
 		if d2 > 0 {
 			newType = "income"
 		}
-		s.DB.Exec(`UPDATE transactions SET linked_txn_id = NULL, type = ? WHERE id = ?`, newType, txnID)
-		recomputeAccountBalance(s.DB, accID)
+		s.DB.Exec(`UPDATE transactions SET linked_txn_id = NULL, type = ?, transfer_kind = '', counterparty = '' WHERE id = ?`, newType, txnID)
+		ledger.RecomputeAccountBalance(s.DB, accID)
 	}
 
 	httpx.WriteJSON(w, 200, map[string]bool{"unlinked": true})
@@ -258,11 +255,16 @@ func (s *Server) handleUnlinkTransfer(w http.ResponseWriter, r *http.Request) {
 // through both accounts, so withdrawal/deposit amounts stay as-is and
 // current_balance (opening + sum(deposits) - sum(withdrawals)) is already
 // correct without a recompute.
-func linkTransferPair(db execer, txnA, txnB int64) error {
-	if _, err := db.Exec(`UPDATE transactions SET linked_txn_id=?, type='transfer' WHERE id=?`, txnB, txnA); err != nil {
+//
+// A linked pair is by definition money between two of the user's own tracked
+// accounts, so transfer_kind is always 'self' here. Investment and family
+// transfers are single-leg (the other side has no transaction stream) and are
+// classified via handleBulkMarkTransfer or a transaction edit instead.
+func linkTransferPair(db ledger.Execer, txnA, txnB int64) error {
+	if _, err := db.Exec(`UPDATE transactions SET linked_txn_id=?, type='transfer', transfer_kind='self' WHERE id=?`, txnB, txnA); err != nil {
 		return fmt.Errorf("linking txn %d: %w", txnA, err)
 	}
-	if _, err := db.Exec(`UPDATE transactions SET linked_txn_id=?, type='transfer' WHERE id=?`, txnA, txnB); err != nil {
+	if _, err := db.Exec(`UPDATE transactions SET linked_txn_id=?, type='transfer', transfer_kind='self' WHERE id=?`, txnA, txnB); err != nil {
 		return fmt.Errorf("linking txn %d: %w", txnB, err)
 	}
 	return nil

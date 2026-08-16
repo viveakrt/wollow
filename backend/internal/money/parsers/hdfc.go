@@ -215,7 +215,54 @@ func ParseHDFCStatement(path string) (*models.ParsedStatement, error) {
 		result.StatementTo = txns[len(txns)-1].TxnDate
 	}
 
+	result.AccountType = detectAccountType(txns)
+
 	return result, nil
+}
+
+// ppfNarrationMarkers are the lines a PPF passbook has and an ordinary account
+// statement does not: contributions are "subscriptions", and the annual credit
+// is "interest paid till <date>".
+var ppfNarrationMarkers = []string{
+	"subscription", "interest paid till", "ppf",
+}
+
+// detectAccountType guesses what kind of account a statement is for.
+//
+// HDFC exports a PPF passbook through the same "Statement of accounts" template
+// as a savings account, so the layout can't tell them apart — but the contents
+// can: a PPF account only ever takes deposits (subscriptions and credited
+// interest) and never pays anything out. Getting this right matters because a
+// PPF balance is a locked long-term asset, not spendable cash.
+//
+// This only ever *suggests* a type; the import preview lets the user override
+// it before anything is written.
+func detectAccountType(txns []models.ParsedTransaction) string {
+	// A single row is too little to conclude anything from.
+	if len(txns) < 2 {
+		return "bank"
+	}
+
+	markerHits := 0
+	for _, t := range txns {
+		if t.WithdrawalAmt > 0 {
+			return "bank" // money leaving rules PPF out outright
+		}
+		lower := strings.ToLower(t.Narration)
+		for _, marker := range ppfNarrationMarkers {
+			if strings.Contains(lower, marker) {
+				markerHits++
+				break
+			}
+		}
+	}
+
+	// Deposit-only alone isn't enough — a dormant salary account looks the same
+	// over a short window — so the passbook vocabulary has to appear as well.
+	if markerHits > 0 {
+		return "ppf"
+	}
+	return "bank"
 }
 
 // paymentMethodPrefixes maps narration prefixes to a normalized payment method label.

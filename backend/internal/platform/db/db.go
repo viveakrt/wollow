@@ -30,6 +30,19 @@ func Open(dataDir string) (*sql.DB, error) {
 	}
 	conn.SetMaxOpenConns(1) // modernc.org/sqlite: keep writes serialized
 
+	// Renames must run before the schema, or CREATE TABLE IF NOT EXISTS would
+	// create an empty table under the new name and the old one's data would be
+	// stranded beside it. Columns follow, because schema.sql indexes some of
+	// them and would fail on a table that predates them.
+	if err := renameLegacyTables(conn); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("renaming legacy tables: %w", err)
+	}
+	if err := addMissingColumnsToExistingTables(conn); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("upgrading existing tables: %w", err)
+	}
+
 	if _, err := conn.Exec(schemaSQL); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("applying schema: %w", err)

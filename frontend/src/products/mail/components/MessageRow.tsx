@@ -1,10 +1,13 @@
 import type { MouseEvent } from 'react'
 import { ACTION_LABELS, type MessageSummary } from '../types'
 import { PRIORITY_STYLES, categoryStyle } from '../theme/categories'
+import { MoneyLinkChip } from './MoneyLinkChip'
 
 interface MessageRowProps {
   accountId: number
   message: MessageSummary
+  selected?: boolean
+  onToggleSelect?: () => void
   onOpen: () => void
   onToggleFlag: () => void
   onDelete: () => void
@@ -13,6 +16,8 @@ interface MessageRowProps {
 
 export function MessageRow({
   message,
+  selected = false,
+  onToggleSelect,
   onOpen,
   onToggleFlag,
   onDelete,
@@ -29,8 +34,21 @@ export function MessageRow({
   return (
     <div
       onClick={onOpen}
-      className="group flex cursor-pointer items-start gap-3 border-b border-[var(--color-border)] px-4 py-3 transition hover:bg-[var(--color-bg)]"
+      className={`group flex cursor-pointer items-start gap-3 border-b border-[var(--color-border)] px-4 py-3 transition hover:bg-[var(--color-bg)] ${
+        selected ? 'bg-[var(--color-hover)]' : ''
+      }`}
     >
+      {onToggleSelect && (
+        <input
+          type="checkbox"
+          checked={selected}
+          onClick={stop}
+          onChange={onToggleSelect}
+          aria-label={selected ? 'Deselect message' : 'Select message'}
+          className="mt-2.5 h-3.5 w-3.5 shrink-0 accent-[var(--color-accent)]"
+        />
+      )}
+
       {/* Priority stripe doubles as the unread indicator's anchor. */}
       <span
         aria-hidden
@@ -78,6 +96,11 @@ export function MessageRow({
             {showAction && (
               <span className="shrink-0 rounded-full border border-[var(--color-border-strong)] px-2 py-0.5 text-[11px] font-medium text-[var(--color-text-muted)]">
                 {ACTION_LABELS[message.action as string] ?? message.action}
+              </span>
+            )}
+            {message.moneyLink && (
+              <span className="shrink-0">
+                <MoneyLinkChip link={message.moneyLink} compact />
               </span>
             )}
           </div>

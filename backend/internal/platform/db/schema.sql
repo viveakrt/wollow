@@ -112,10 +112,25 @@ CREATE TABLE IF NOT EXISTS classifications (
 CREATE INDEX IF NOT EXISTS idx_classifications_category ON classifications(category);
 CREATE INDEX IF NOT EXISTS idx_classifications_priority ON classifications(priority);
 
+-- One row per sender a user has unsubscribed from (or manually marked as
+-- such). Local bookkeeping only -- it does not touch the mailing list itself
+-- beyond whatever request the unsubscribe attempt already made.
+CREATE TABLE IF NOT EXISTS sender_status (
+    account_id          INTEGER NOT NULL REFERENCES mail_accounts(id) ON DELETE CASCADE,
+    from_email          TEXT NOT NULL,
+    unsubscribed_at     TEXT NOT NULL DEFAULT '',
+    unsubscribe_method  TEXT NOT NULL DEFAULT '', -- http, mailto, manual
+    PRIMARY KEY (account_id, from_email)
+);
+
 -- =====================================================================
 -- MONEY
 -- =====================================================================
 
+-- A bank account, card, wallet, loan or deposit. account_type decides whether
+-- the balance counts as an asset or a liability on the dashboard, so alert
+-- ingest works hard to get it right rather than defaulting everything to one
+-- kind (see money/ledger/accounts.go).
 CREATE TABLE IF NOT EXISTS finance_accounts (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT NOT NULL,
@@ -125,10 +140,119 @@ CREATE TABLE IF NOT EXISTS finance_accounts (
     currency        TEXT NOT NULL DEFAULT 'INR',
     opening_balance REAL NOT NULL DEFAULT 0,
     current_balance REAL NOT NULL DEFAULT 0,
+    credit_limit    REAL NOT NULL DEFAULT 0,      -- cards only; 0 means unknown
     ifsc            TEXT NOT NULL DEFAULT '',
     branch          TEXT NOT NULL DEFAULT '',
+    -- How this row got here: manual, email (discovered by alert ingest), or
+    -- statement. Only 'email' rows have their guessed account_type corrected
+    -- automatically later; a type the user chose is never overwritten.
+    source          TEXT NOT NULL DEFAULT 'manual',
+    -- Whether this account's balance counts toward net worth. A family
+    -- member's account, or a closed/business account, can be tracked without
+    -- distorting the owner's own figures.
+    include_in_networth INTEGER NOT NULL DEFAULT 1,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_finance_accounts_number
+    ON finance_accounts(account_number);
+
+-- A balance the bank itself reported, from a balance-update email or the
+-- summary block of a statement. This is stronger evidence than any sum over
+-- transactions: RecomputeAccountBalance anchors on the most recent snapshot and
+-- applies only the transactions dated after it, so an account with a partial
+-- transaction history still shows a balance the bank agrees with.
+CREATE TABLE IF NOT EXISTS balance_snapshots (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL REFERENCES finance_accounts(id) ON DELETE CASCADE,
+    as_of      TEXT NOT NULL,                 -- YYYY-MM-DD
+    balance    REAL NOT NULL,
+    source     TEXT NOT NULL DEFAULT 'email', -- email, statement, manual
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(account_id, as_of)
+);
+
+-- Deposits and holdings: fixed deposits, PPF/EPF/NPS, mutual funds, stocks.
+-- Kept apart from finance_accounts because the interesting facts are different
+-- ones -- maturity date, rate, units -- and because a deposit has no
+-- transaction stream to derive a balance from.
+CREATE TABLE IF NOT EXISTS investments (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id      INTEGER REFERENCES finance_accounts(id) ON DELETE SET NULL,
+    kind            TEXT NOT NULL DEFAULT 'fd', -- fd, rd, ppf, epf, nps, mutual_fund, stock, us_stock, bond, gold, other
+    institution     TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL DEFAULT '',
+    identifier      TEXT NOT NULL DEFAULT '',   -- deposit / folio / demat number
+    currency        TEXT NOT NULL DEFAULT 'INR',
+    invested_amount REAL NOT NULL DEFAULT 0,
+    current_value   REAL NOT NULL DEFAULT 0,
+    maturity_amount REAL,
+    interest_rate   REAL,
+    units           REAL,
+    -- Last known price per unit and when it was taken. Populated by hand or by
+    -- a price feed; without it a holding can only report its cost, which is
+    -- why current_value falls back to invested_amount rather than reading zero.
+    last_price      REAL,
+    last_price_at   TEXT NOT NULL DEFAULT '',
+    start_date      TEXT NOT NULL DEFAULT '',
+    maturity_date   TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'active', -- active, matured, closed
+    source          TEXT NOT NULL DEFAULT 'manual', -- manual, statement, email
+    notes           TEXT NOT NULL DEFAULT '',
+    -- Stable identity for re-imports: importing the same FD summary twice must
+    -- update the rows, not duplicate them. Empty for hand-entered holdings,
+    -- which is why the index below is partial.
+    dedupe_key      TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_investments_dedupe
+    ON investments(dedupe_key) WHERE dedupe_key != '';
+CREATE INDEX IF NOT EXISTS idx_investments_maturity ON investments(maturity_date);
+
+-- Individual securities orders, from broker confirmation emails.
+--
+-- A holding is the running sum of its trades, not a figure written once. Two
+-- buys of the same stock months apart have to combine into one position with a
+-- blended cost, and only the trade list can do that. It also makes ingest
+-- idempotent: dedupe_key is the source email, so re-reading the mailbox
+-- re-writes the same rows instead of buying the stock again.
+CREATE TABLE IF NOT EXISTS investment_trades (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    investment_id INTEGER NOT NULL REFERENCES investments(id) ON DELETE CASCADE,
+    side          TEXT NOT NULL DEFAULT 'buy',   -- buy, sell
+    shares        REAL NOT NULL DEFAULT 0,
+    price         REAL NOT NULL DEFAULT 0,       -- per share, in the trade's currency
+    amount        REAL NOT NULL DEFAULT 0,       -- what actually moved
+    currency      TEXT NOT NULL DEFAULT 'INR',
+    trade_date    TEXT NOT NULL DEFAULT '',
+    order_type    TEXT NOT NULL DEFAULT '',
+    source        TEXT NOT NULL DEFAULT 'email', -- email, manual
+    dedupe_key    TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_investment_trades_dedupe
+    ON investment_trades(dedupe_key) WHERE dedupe_key != '';
+CREATE INDEX IF NOT EXISTS idx_investment_trades_holding
+    ON investment_trades(investment_id, trade_date);
+
+-- Exchange rates used to bring foreign holdings into the rupee net worth.
+--
+-- There is no market feed here, so a rate is either something the user typed
+-- or something derived from their own bank's forex transactions — a remittance
+-- of INR 99,670.15 for USD 1,036.18 states a rate of 96.19 more credibly than
+-- any constant this code could hardcode. `source` records which, so a number
+-- moving net worth is never anonymous.
+CREATE TABLE IF NOT EXISTS fx_rates (
+    currency     TEXT PRIMARY KEY,
+    inr_per_unit REAL NOT NULL,
+    as_of        TEXT NOT NULL DEFAULT '',
+    source       TEXT NOT NULL DEFAULT 'manual', -- manual, derived
+    note         TEXT NOT NULL DEFAULT '',
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS categories (
@@ -171,6 +295,14 @@ CREATE TABLE IF NOT EXISTS transactions (
     import_batch_id INTEGER REFERENCES import_batches(id) ON DELETE SET NULL,
     dedupe_hash     TEXT NOT NULL DEFAULT '',
     linked_txn_id   INTEGER REFERENCES transactions(id) ON DELETE SET NULL, -- matching leg of a cross-account transfer
+    -- What kind of movement a type='transfer' row is: 'self' (between own
+    -- accounts), 'investment' (own account -> an investment), 'family' (own
+    -- account -> a family member). Empty for income/expense rows. A transfer
+    -- needs no linked leg: money sent to a family member or into a demat
+    -- account has no second transaction stream to pair with.
+    transfer_kind   TEXT NOT NULL DEFAULT '',
+    -- Who or what the transfer went to ("Mom", "Zerodha"). Free text.
+    counterparty    TEXT NOT NULL DEFAULT '',
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -178,6 +310,39 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_txn_dedupe ON transactions(account_id, ded
 CREATE INDEX IF NOT EXISTS idx_txn_date ON transactions(txn_date);
 CREATE INDEX IF NOT EXISTS idx_txn_account ON transactions(account_id);
 CREATE INDEX IF NOT EXISTS idx_txn_category ON transactions(category_id);
+
+-- One row per AI-classified transaction — the Money counterpart of the
+-- `classifications` table Mail keeps for messages, and it works the same way:
+-- classification happens once, is persisted with the model that produced it,
+-- and the UI reads it from here instead of calling a model on every render.
+--
+-- It is deliberately a SEPARATE table from transactions rather than columns on
+-- it. The model's read of a transaction and the user's own edits are different
+-- facts, and keeping them apart is what lets a suggestion be shown, ignored,
+-- or re-run without ever destroying what the user typed. `applied` records
+-- whether the suggestion was written through to the transaction itself.
+CREATE TABLE IF NOT EXISTS transaction_classifications (
+    transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id) ON DELETE CASCADE,
+    category       TEXT NOT NULL DEFAULT '',  -- must name an existing categories.name
+    subcategory    TEXT NOT NULL DEFAULT '',
+    merchant       TEXT NOT NULL DEFAULT '',  -- cleaned payee, e.g. "UPI-SWIGGY-123@ybl" -> "Swiggy"
+    payment_method TEXT NOT NULL DEFAULT '',  -- UPI, NEFT, IMPS, POS, ATM, card, auto_debit, cash
+    nature         TEXT NOT NULL DEFAULT '',  -- expense, income, transfer
+    transfer_kind  TEXT NOT NULL DEFAULT '',  -- self, investment, family (only when nature='transfer')
+    counterparty   TEXT NOT NULL DEFAULT '',
+    is_recurring   INTEGER NOT NULL DEFAULT 0, -- subscription, SIP, EMI
+    is_bill        INTEGER NOT NULL DEFAULT 0,
+    is_refund      INTEGER NOT NULL DEFAULT 0,
+    needs_review   INTEGER NOT NULL DEFAULT 0, -- model was unsure, or named no known category
+    confidence     REAL NOT NULL DEFAULT 0,
+    summary        TEXT NOT NULL DEFAULT '',
+    model          TEXT NOT NULL DEFAULT '',
+    classified_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    applied        INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_txn_class_review
+    ON transaction_classifications(needs_review);
 
 CREATE TABLE IF NOT EXISTS category_rules (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -204,8 +369,16 @@ CREATE TABLE IF NOT EXISTS bills (
     due_date         TEXT NOT NULL DEFAULT '',
     source_email_id  INTEGER REFERENCES message_links(id) ON DELETE SET NULL,
     status           TEXT NOT NULL DEFAULT 'unpaid', -- unpaid, paid
+    paid_at          TEXT NOT NULL DEFAULT '',
     created_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- One statement per card per period (issuers resend the same statement mail,
+-- and without that constraint the dashboard grows a fresh "upcoming bill" for
+-- each copy) is enforced by idx_bills_statement. It is NOT declared here: a
+-- database written before the constraint existed already holds duplicates, and
+-- CREATE UNIQUE INDEX would fail outright on it. migrations.go dedupes first,
+-- then creates it. See dedupeBills.
 
 CREATE INDEX IF NOT EXISTS idx_bills_due_date ON bills(due_date);
 
@@ -234,16 +407,6 @@ CREATE TABLE IF NOT EXISTS message_links (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_message_link_dedupe
     ON message_links(mail_account_id, rfc_message_id);
 CREATE INDEX IF NOT EXISTS idx_message_link_message ON message_links(message_id);
-
--- Money's own IMAP cursor, separate from sync_state because it tracks a
--- different thing: the highest UID *parsed for finance*, not the highest UID
--- indexed. Dropped once Money ingest reads the shared index and derives its
--- backlog from messages that have no message_links row yet.
-CREATE TABLE IF NOT EXISTS money_ingest_state (
-    mail_account_id INTEGER PRIMARY KEY REFERENCES mail_accounts(id) ON DELETE CASCADE,
-    last_uid        INTEGER NOT NULL DEFAULT 0,
-    last_synced_at  TEXT NOT NULL DEFAULT ''
-);
 
 -- One password formula per card issuer (most Indian issuers use a fixed
 -- formula like name+DOB). Encrypted at rest with the same master key as

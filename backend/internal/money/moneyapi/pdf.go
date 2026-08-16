@@ -3,9 +3,31 @@ package moneyapi
 import (
 	"net/http"
 
+	"wollow/backend/internal/money/ingest"
 	"wollow/backend/internal/money/pdfparse"
 	"wollow/backend/internal/platform/httpx"
 )
+
+// PDFPasswordLookup adapts the stored, encrypted pdf_passwords table to the
+// plain function ingest needs — ingest has no reason to know how passwords
+// are encrypted at rest, only whether one is available for a given issuer.
+// Exported so cmd/server can wire it into the AfterSync hook, which runs
+// outside this package.
+func (s *Server) PDFPasswordLookup() ingest.PDFPasswordLookup {
+	return func(issuer string) (string, bool) {
+		var encrypted string
+		if err := s.DB.QueryRow(
+			`SELECT encrypted_password FROM pdf_passwords WHERE issuer = ?`, issuer,
+		).Scan(&encrypted); err != nil {
+			return "", false
+		}
+		password, err := s.Box.Decrypt(encrypted)
+		if err != nil {
+			return "", false
+		}
+		return password, true
+	}
+}
 
 type pdfPassword struct {
 	ID       int64  `json:"id"`

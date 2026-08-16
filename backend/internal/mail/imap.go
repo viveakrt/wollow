@@ -1,11 +1,9 @@
 package mail
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
 	"net"
 	"regexp"
 	"sort"
@@ -16,7 +14,6 @@ import (
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
-	"github.com/emersion/go-message/mail"
 )
 
 // IMAPProvider implements Provider on top of a single persistent IMAP
@@ -29,11 +26,48 @@ type IMAPProvider struct {
 	mailbox string // currently SELECTed mailbox, "" if none
 }
 
+// connectTimeout bounds the whole dial → TLS handshake → LOGIN sequence.
+//
+// The library's dialer times out the TCP connect, but nothing bounds the
+// handshake or the login that follow: a server that accepts a connection and
+// then stalls — or acknowledges STARTTLS without ever negotiating — hangs the
+// request forever. Every mailbox operation starts here, so an unbounded
+// connect is an unbounded API call.
+const connectTimeout = 30 * time.Second
+
 // NewIMAPProvider dials and logs in to the IMAP server described by creds.
 // If creds.UseTLS is true, implicit TLS (port 993 style) is used; otherwise
 // the connection is upgraded via STARTTLS when the server advertises it, and
 // falls back to a plaintext connection otherwise.
 func NewIMAPProvider(creds AccountCredentials) (*IMAPProvider, error) {
+	type result struct {
+		provider *IMAPProvider
+		err      error
+	}
+	// Buffered so the goroutine can always finish and hand back whatever it
+	// built, even after this function has given up waiting for it.
+	done := make(chan result, 1)
+	go func() {
+		provider, err := dialAndLogin(creds)
+		done <- result{provider, err}
+	}()
+
+	select {
+	case r := <-done:
+		return r.provider, r.err
+	case <-time.After(connectTimeout):
+		// Close whatever the abandoned attempt eventually produces, so a slow
+		// server costs a delayed cleanup rather than a leaked socket.
+		go func() {
+			if r := <-done; r.provider != nil {
+				r.provider.Close()
+			}
+		}()
+		return nil, fmt.Errorf("imap: connecting to %s timed out after %s", creds.Host, connectTimeout)
+	}
+}
+
+func dialAndLogin(creds AccountCredentials) (*IMAPProvider, error) {
 	addr := net.JoinHostPort(creds.Host, strconv.Itoa(creds.Port))
 
 	var (
@@ -203,6 +237,10 @@ func formatAddressList(addrs []imap.Address) string {
 }
 
 // GetMessage fetches the full message (envelope + body) for the given UID.
+//
+// The body section is peeked, so opening a message never implicitly marks it
+// read: the API layer sets \Seen explicitly, which is what lets it mirror the
+// change into the local index in the same breath.
 func (p *IMAPProvider) GetMessage(ctx context.Context, folder, id string) (*Message, error) {
 	uid, err := parseUID(id)
 	if err != nil {
@@ -217,7 +255,7 @@ func (p *IMAPProvider) GetMessage(ctx context.Context, folder, id string) (*Mess
 	}
 
 	uidSet := imap.UIDSetNum(uid)
-	bodySection := &imap.FetchItemBodySection{}
+	bodySection := &imap.FetchItemBodySection{Peek: true}
 	fetchOptions := &imap.FetchOptions{
 		UID:         true,
 		Envelope:    true,
@@ -234,97 +272,77 @@ func (p *IMAPProvider) GetMessage(ctx context.Context, folder, id string) (*Mess
 	m := messages[0]
 
 	msg := &Message{MessageSummary: summaryFromFetch(uid, m)}
+	if m.Envelope != nil {
+		msg.To = formatAddressList(m.Envelope.To)
+		msg.Cc = formatAddressList(m.Envelope.Cc)
+		msg.ReplyTo = formatAddressList(m.Envelope.ReplyTo)
+	}
 
-	raw := m.FindBodySection(bodySection)
-	if raw != nil {
-		if err := populateBody(msg, raw); err != nil {
-			return nil, fmt.Errorf("imap: parse message %s: %w", id, err)
-		}
+	// A message whose MIME tree is malformed still opens: parseMessage never
+	// fails, it degrades. Losing the body of every quirky sender was the whole
+	// reason this stopped returning an error.
+	if raw := m.FindBodySection(bodySection); raw != nil {
+		parsed := parseMessage(raw)
+		msg.BodyText = parsed.Text
+		msg.BodyHTML = parsed.HTML
+		msg.Attachments = parsed.Attachments
+	}
+	if msg.Attachments == nil {
+		msg.Attachments = []Attachment{}
 	}
 
 	return msg, nil
 }
 
-// populateBody parses a raw RFC 5322 message and fills in BodyText/BodyHTML,
-// preferring text/plain for BodyText and text/html for BodyHTML when the
-// message is multipart. For a non-multipart message, the single body is used
-// to fill whichever field matches its content type (defaulting to text).
-func populateBody(msg *Message, raw []byte) error {
-	mr, err := mail.CreateReader(bytes.NewReader(raw))
-	if err != nil {
-		return err
-	}
-
-	for {
-		part, err := mr.NextPart()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			// Stop on malformed parts but keep whatever we've already parsed.
-			break
-		}
-
-		switch h := part.Header.(type) {
-		case *mail.InlineHeader:
-			contentType, _, _ := h.ContentType()
-			b, readErr := io.ReadAll(part.Body)
-			if readErr != nil {
-				continue
-			}
-			switch contentType {
-			case "text/html":
-				if msg.BodyHTML == "" {
-					msg.BodyHTML = string(b)
-				}
-			default:
-				if msg.BodyText == "" {
-					msg.BodyText = string(b)
-				}
-			}
-		case *mail.AttachmentHeader:
-			// Attachments are not surfaced through Message yet; skip.
-		}
-	}
-
-	return nil
-}
-
-// DeleteMessage permanently deletes a message: it marks the UID \Deleted and
-// expunges it immediately. We delete outright rather than moving to Trash
-// because there is no reliable, provider-agnostic "Trash" folder name to
-// target across arbitrary IMAP servers.
-func (p *IMAPProvider) DeleteMessage(ctx context.Context, folder, id string) error {
+// FetchPart returns one decoded MIME part — an attachment to download, or the
+// inline image an HTML body references by cid.
+func (p *IMAPProvider) FetchPart(ctx context.Context, folder, id, partID string) (*PartContent, error) {
 	uid, err := parseUID(id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if err := p.selectMailbox(folder); err != nil {
+		return nil, err
+	}
+
+	// The whole message is fetched and walked rather than asking the server for
+	// BODY[<part>]: the part numbers a client can derive from BODYSTRUCTURE
+	// disagree with the ones go-message walks for nested and message/rfc822
+	// parts, and a mismatch there serves the wrong attachment rather than
+	// erroring. Walking one raw message is cheap enough at this scale.
+	bodySection := &imap.FetchItemBodySection{Peek: true}
+	messages, err := p.client.Fetch(imap.UIDSetNum(uid), &imap.FetchOptions{
+		UID:         true,
+		BodySection: []*imap.FetchItemBodySection{bodySection},
+	}).Collect()
+	if err != nil {
+		return nil, fmt.Errorf("imap: fetch part %s of %s: %w", partID, id, err)
+	}
+	if len(messages) == 0 {
+		return nil, fmt.Errorf("imap: message %s not found in %q", id, folder)
+	}
+	raw := messages[0].FindBodySection(bodySection)
+	if raw == nil {
+		return nil, fmt.Errorf("imap: no body for message %s", id)
+	}
+	return findPart(raw, partID)
+}
+
+// DeleteMessage deletes one message, moving it to the server's trash where
+// there is one. See DeleteMessages for why moving beats expunging — on Gmail,
+// expunging from INBOX only strips the label and leaves the mail in All Mail.
+func (p *IMAPProvider) DeleteMessage(ctx context.Context, folder, id string) error {
+	deleted, err := p.DeleteMessages(ctx, folder, []string{id})
+	if err != nil {
 		return err
 	}
-
-	uidSet := imap.UIDSetNum(uid)
-	storeFlags := imap.StoreFlags{
-		Op:     imap.StoreFlagsAdd,
-		Flags:  []imap.Flag{imap.FlagDeleted},
-		Silent: true,
+	if len(deleted) == 0 {
+		return fmt.Errorf("imap: could not delete message %s in %q", id, folder)
 	}
-	if err := p.client.Store(uidSet, &storeFlags, nil).Close(); err != nil {
-		return fmt.Errorf("imap: mark deleted %s: %w", id, err)
-	}
-
-	if err := p.client.UIDExpunge(uidSet).Close(); err != nil {
-		// Some servers don't support UID EXPUNGE (requires UIDPLUS); fall
-		// back to a plain EXPUNGE of the whole mailbox.
-		if err2 := p.client.Expunge().Close(); err2 != nil {
-			return fmt.Errorf("imap: expunge %s: %w", id, err2)
-		}
-	}
-
 	return nil
 }
 
@@ -357,6 +375,145 @@ func (p *IMAPProvider) SetFlag(ctx context.Context, folder, id, flag string, val
 		return fmt.Errorf("imap: set flag %s on %s: %w", flag, id, err)
 	}
 	return nil
+}
+
+// FetchHeaders returns the raw RFC 5322 header block for one message, using a
+// peeking BODY[HEADER] section so reading headers never marks the message as
+// seen.
+func (p *IMAPProvider) FetchHeaders(ctx context.Context, folder, id string) ([]byte, error) {
+	uid, err := parseUID(id)
+	if err != nil {
+		return nil, err
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if err := p.selectMailbox(folder); err != nil {
+		return nil, err
+	}
+
+	bodySection := &imap.FetchItemBodySection{Specifier: imap.PartSpecifierHeader, Peek: true}
+	fetchOptions := &imap.FetchOptions{
+		UID:         true,
+		BodySection: []*imap.FetchItemBodySection{bodySection},
+	}
+	messages, err := p.client.Fetch(imap.UIDSetNum(uid), fetchOptions).Collect()
+	if err != nil {
+		return nil, fmt.Errorf("imap: fetch headers %s: %w", id, err)
+	}
+	if len(messages) == 0 {
+		return nil, fmt.Errorf("imap: message %s not found in %q", id, folder)
+	}
+
+	raw := messages[0].FindBodySection(bodySection)
+	if raw == nil {
+		return nil, fmt.Errorf("imap: no header section for %s", id)
+	}
+	return raw, nil
+}
+
+// MoveMessage relocates a message into destFolder, archiving it. If the
+// server doesn't have destFolder yet, it is created and the move retried
+// once — there is no standard "Archive" folder name across IMAP servers, so
+// callers that always ask for the same name (see ResolveArchiveFolder) will
+// converge on creating it once and reusing it after.
+func (p *IMAPProvider) MoveMessage(ctx context.Context, folder, id, destFolder string) error {
+	uid, err := parseUID(id)
+	if err != nil {
+		return err
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if err := p.selectMailbox(folder); err != nil {
+		return err
+	}
+
+	uidSet := imap.UIDSetNum(uid)
+	if _, err := p.client.Move(uidSet, destFolder).Wait(); err != nil {
+		if createErr := p.client.Create(destFolder, nil).Wait(); createErr != nil {
+			return fmt.Errorf("imap: move %s to %q: %w", id, destFolder, err)
+		}
+		// MOVE requires the source mailbox re-selected after CREATE on some
+		// servers; selectMailbox is a no-op if it never actually changed.
+		p.mailbox = ""
+		if err := p.selectMailbox(folder); err != nil {
+			return err
+		}
+		if _, err := p.client.Move(uidSet, destFolder).Wait(); err != nil {
+			return fmt.Errorf("imap: move %s to %q after creating it: %w", id, destFolder, err)
+		}
+	}
+	return nil
+}
+
+// ResolveArchiveFolder finds the mailbox the server itself flags \Archive
+// (RFC 6154 SPECIAL-USE), falling back to the literal name "Archive" when the
+// server doesn't advertise SPECIAL-USE or has no such mailbox — MoveMessage
+// will create it on first use in that case.
+func (p *IMAPProvider) ResolveArchiveFolder(ctx context.Context) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if archive := p.resolveSpecialFolder(imap.MailboxAttrArchive, "", nil); archive != "" {
+		return archive, nil
+	}
+	// Gmail has no \Archive mailbox: archiving there means moving into All
+	// Mail, which drops the INBOX label and is exactly what the user means.
+	// Without this the fallback below invents a stray "Archive" label instead.
+	if all := p.resolveSpecialFolder(imap.MailboxAttrAll, "", nil); all != "" {
+		return all, nil
+	}
+	return "Archive", nil
+}
+
+// trashFallbackNames are the folder names servers without SPECIAL-USE use for
+// their trash, most specific first. Unlike Archive, an unmatched name is *not*
+// created: inventing a "Trash" folder the server doesn't recognize would leave
+// deleted mail somewhere the user's other clients never look.
+var trashFallbackNames = []string{
+	"[Gmail]/Trash", "[Google Mail]/Trash",
+	"Trash", "Deleted Items", "Deleted Messages", "INBOX.Trash",
+}
+
+// ResolveTrashFolder finds the mailbox the server flags \Trash, or a
+// conventional trash folder that actually exists. Returns "" when the server
+// has no trash at all, which tells DeleteMessages to fall back to expunging.
+func (p *IMAPProvider) ResolveTrashFolder(ctx context.Context) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.resolveSpecialFolder(imap.MailboxAttrTrash, "", trashFallbackNames), nil
+}
+
+// resolveSpecialFolder looks for a mailbox carrying the given RFC 6154
+// attribute, then for any of the fallback names the server actually lists, and
+// finally returns defaultName. Caller must hold p.mu.
+func (p *IMAPProvider) resolveSpecialFolder(attr imap.MailboxAttr, defaultName string, fallbacks []string) string {
+	mailboxes, err := p.client.List("", "*", &imap.ListOptions{ReturnSpecialUse: true}).Collect()
+	if err != nil {
+		// Discovery failing shouldn't block the operation.
+		return defaultName
+	}
+
+	existing := make(map[string]string, len(mailboxes))
+	for _, mb := range mailboxes {
+		existing[strings.ToLower(mb.Mailbox)] = mb.Mailbox
+		for _, a := range mb.Attrs {
+			if a == attr {
+				return mb.Mailbox
+			}
+		}
+	}
+	// No SPECIAL-USE match: accept a conventional name, but only one the
+	// server really has.
+	for _, name := range fallbacks {
+		if actual, ok := existing[strings.ToLower(name)]; ok {
+			return actual
+		}
+	}
+	return defaultName
 }
 
 // ListUIDs returns every UID in the folder, ascending.
@@ -433,6 +590,7 @@ func (p *IMAPProvider) FetchForSync(ctx context.Context, folder string, uids []u
 		}
 		if m.Envelope != nil {
 			sm.Subject = m.Envelope.Subject
+			sm.RFCMessageID = strings.TrimSpace(m.Envelope.MessageID)
 			if !m.Envelope.Date.IsZero() {
 				sm.Date = m.Envelope.Date.UTC().Format(time.RFC3339)
 			}
@@ -539,4 +697,58 @@ func parseUID(id string) (imap.UID, error) {
 		return 0, fmt.Errorf("imap: invalid message id %q: %w", id, err)
 	}
 	return imap.UID(n), nil
+}
+
+// rawFetchBatch caps how many whole messages are pulled per FETCH. Bodies with
+// attachments are far larger than the header records FetchForSync deals in, so
+// this is deliberately much smaller than the sync batch size.
+const rawFetchBatch = 50
+
+// FetchRaw returns complete messages for the given UIDs, using a peeking BODY
+// section so reading a message for parsing never marks it as seen in the user's
+// actual mailbox.
+func (p *IMAPProvider) FetchRaw(ctx context.Context, folder string, uids []uint32) ([]RawMessage, error) {
+	if len(uids) == 0 {
+		return nil, nil
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if err := p.selectMailbox(folder); err != nil {
+		return nil, err
+	}
+
+	bodySection := &imap.FetchItemBodySection{Peek: true}
+	fetchOptions := &imap.FetchOptions{
+		UID:         true,
+		BodySection: []*imap.FetchItemBodySection{bodySection},
+	}
+
+	out := make([]RawMessage, 0, len(uids))
+	for start := 0; start < len(uids); start += rawFetchBatch {
+		if err := ctx.Err(); err != nil {
+			return out, err
+		}
+		end := min(start+rawFetchBatch, len(uids))
+
+		imapUIDs := make([]imap.UID, 0, end-start)
+		for _, uid := range uids[start:end] {
+			imapUIDs = append(imapUIDs, imap.UID(uid))
+		}
+
+		messages, err := p.client.Fetch(imap.UIDSetNum(imapUIDs...), fetchOptions).Collect()
+		if err != nil {
+			return nil, fmt.Errorf("imap: fetch raw %q: %w", folder, err)
+		}
+		for _, m := range messages {
+			raw := m.FindBodySection(bodySection)
+			if raw == nil {
+				continue
+			}
+			out = append(out, RawMessage{UID: uint32(m.UID), Raw: raw})
+		}
+	}
+
+	return out, nil
 }

@@ -24,12 +24,21 @@ type Server struct {
 	// providerFactory builds a mail.Provider for an account row; overridable in tests.
 	providerFactory func(creds mail.AccountCredentials) (mail.Provider, error)
 
-	// syncMu serializes syncs per account id, so a manual sync and the
-	// background ticker can never open competing IMAP sessions for one account.
+	// syncMu serializes mailbox access per account id, so a manual sync, the
+	// background ticker and a bulk action can never open competing IMAP
+	// sessions for one account. Values are buffered channels of size 1 rather
+	// than Mutexes, so waiters can give up when their request context does.
 	syncMu sync.Map
 
 	// jobs tracks detached long-running work (sync, classification).
 	jobs *jobRunner
+
+	// AfterSync, if set, runs inside the per-account lock with the live
+	// connection immediately after the index is updated. Money's finance
+	// ingest hangs off this, which is what keeps one mailbox to one IMAP
+	// session: sync indexes the headers, then ingest pulls bodies for the
+	// handful of messages it cares about, over the same connection.
+	AfterSync func(ctx context.Context, accountID int64, provider mail.Provider) error
 }
 
 func NewServer(database *sql.DB, box *crypto.Box) *Server {
@@ -51,37 +60,88 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/mail/accounts/{id}", s.handleDeleteAccount)
 	mux.HandleFunc("GET /api/mail/accounts/{id}/messages", s.handleListMessages)
 	mux.HandleFunc("GET /api/mail/accounts/{id}/messages/{msgId}", s.handleGetMessage)
+	mux.HandleFunc("GET /api/mail/accounts/{id}/messages/{msgId}/parts/{partId}", s.handleGetMessagePart)
 	mux.HandleFunc("DELETE /api/mail/accounts/{id}/messages/{msgId}", s.handleDeleteMessage)
 	mux.HandleFunc("POST /api/mail/accounts/{id}/messages/{msgId}/flag", s.handleSetFlag)
+	// Literal segments like "bulk-delete" outrank the "{msgId}" wildcard in
+	// stdlib's precedence rules (see Money's Register for the same pattern),
+	// so these coexist with the single-message routes above regardless of order.
+	mux.HandleFunc("POST /api/mail/accounts/{id}/messages/bulk-delete", s.handleBulkDeleteMessages)
+	mux.HandleFunc("POST /api/mail/accounts/{id}/messages/bulk-flag", s.handleBulkSetFlag)
 	mux.HandleFunc("POST /api/mail/accounts/{id}/messages/{msgId}/summarize", s.handleSummarize)
 	mux.HandleFunc("POST /api/mail/accounts/{id}/sync", s.handleSync)
 	mux.HandleFunc("GET /api/mail/accounts/{id}/sync/status", s.handleSyncStatus)
 	mux.HandleFunc("GET /api/mail/accounts/{id}/insights", s.handleInsights)
+	mux.HandleFunc("GET /api/mail/accounts/{id}/senders", s.handleListSenders)
+	mux.HandleFunc("POST /api/mail/accounts/{id}/senders/unsubscribe", s.handleUnsubscribeSender)
+	mux.HandleFunc("POST /api/mail/accounts/{id}/senders/resubscribe", s.handleResubscribeSender)
+	mux.HandleFunc("POST /api/mail/accounts/{id}/senders/mark-unsubscribed", s.handleMarkSenderUnsubscribed)
+	mux.HandleFunc("POST /api/mail/accounts/{id}/senders/bulk-flag", s.handleBulkSenderFlag)
+	mux.HandleFunc("POST /api/mail/accounts/{id}/senders/bulk-delete", s.handleBulkDeleteSenders)
+	mux.HandleFunc("POST /api/mail/accounts/{id}/senders/bulk-archive", s.handleBulkArchiveSenders)
+	// Sender-level bulk actions run detached, so the client polls this for
+	// progress rather than holding a request open for thousands of messages.
+	mux.HandleFunc("GET /api/mail/accounts/{id}/senders/bulk-status", s.handleBulkSenderStatus)
 	mux.HandleFunc("POST /api/mail/accounts/{id}/classify", s.handleClassify)
 	mux.HandleFunc("GET /api/mail/accounts/{id}/classify/status", s.handleClassifyStatus)
 }
 
-// syncAccount connects to IMAP and brings the local index up to date. Only one
-// sync per account runs at a time.
-func (s *Server) syncAccount(ctx context.Context, accountID int64, folder string) (*wsync.Result, error) {
-	lockAny, _ := s.syncMu.LoadOrStore(accountID, &sync.Mutex{})
-	lock := lockAny.(*sync.Mutex)
-	lock.Lock()
-	defer lock.Unlock()
+// WithProvider opens one connection to the given mailbox and runs fn against
+// it, holding the per-account lock for the duration. Everything that touches a
+// mailbox goes through here, so a manual sync, the background ticker, and
+// Money's ingest can never open competing IMAP sessions for one account.
+//
+// The wait for that lock honours ctx. A background sync over a large mailbox
+// can hold it for a while, and a user action queued behind one used to block
+// with no way out — the request simply hung until something upstream gave up,
+// which reads as "the button does nothing". Now it fails with a reason.
+func (s *Server) WithProvider(ctx context.Context, accountID int64, fn func(mail.Provider) error) error {
+	// A buffered channel rather than a Mutex, because a Mutex cannot be
+	// acquired with a timeout or a cancellation.
+	lockAny, _ := s.syncMu.LoadOrStore(accountID, make(chan struct{}, 1))
+	lock := lockAny.(chan struct{})
+	select {
+	case lock <- struct{}{}:
+		defer func() { <-lock }()
+	case <-ctx.Done():
+		return fmt.Errorf("mailbox %d is busy with another operation: %w", accountID, ctx.Err())
+	}
 
 	creds, err := s.loadAccountCredentials(accountID)
 	if err != nil {
-		return nil, fmt.Errorf("account not found: %w", err)
+		return fmt.Errorf("account not found: %w", err)
 	}
 	provider, err := s.providerFactory(creds)
 	if err != nil {
-		return nil, fmt.Errorf("could not connect to mail server: %w", err)
+		return fmt.Errorf("could not connect to mail server: %w", err)
 	}
 	if closer, ok := provider.(interface{ Close() error }); ok {
 		defer closer.Close()
 	}
 
-	return wsync.SyncAccount(ctx, s.DB, provider, accountID, folder)
+	return fn(provider)
+}
+
+// syncAccount brings the local index up to date, then hands the same live
+// connection to AfterSync so downstream consumers don't need one of their own.
+func (s *Server) syncAccount(ctx context.Context, accountID int64, folder string) (*wsync.Result, error) {
+	var result *wsync.Result
+	err := s.WithProvider(ctx, accountID, func(provider mail.Provider) error {
+		var err error
+		result, err = wsync.SyncAccount(ctx, s.DB, provider, accountID, folder)
+		if err != nil {
+			return err
+		}
+		if s.AfterSync != nil {
+			// A downstream failure must not invalidate the sync that just
+			// succeeded; the index is already committed either way.
+			if err := s.AfterSync(ctx, accountID, provider); err != nil {
+				log.Printf("sync: after-sync hook for account %d failed: %v", accountID, err)
+			}
+		}
+		return nil
+	})
+	return result, err
 }
 
 // SyncAllAccounts syncs every enabled mailbox; used by the background ticker.

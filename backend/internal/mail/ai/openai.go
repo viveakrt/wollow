@@ -115,6 +115,10 @@ func (p *OpenAIProvider) complete(ctx context.Context, prompt string, maxTokens 
 	return content, nil
 }
 
+func (p *OpenAIProvider) Complete(ctx context.Context, prompt string, maxTokens int) (string, error) {
+	return p.complete(ctx, prompt, maxTokens)
+}
+
 func (p *OpenAIProvider) Summarize(ctx context.Context, subject, bodyPreview string) (string, error) {
 	if len(bodyPreview) > MaxBodyPreviewChars {
 		bodyPreview = bodyPreview[:MaxBodyPreviewChars]

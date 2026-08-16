@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  bulkDeleteMessages,
+  bulkSetMessageFlag,
   deleteMessage,
   getAccounts,
   getClassifyStatus,
@@ -27,13 +29,22 @@ const FOLDER = 'INBOX'
 export function InboxPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  // Read once on mount: a deep link from the Senders page ("view all mail
+  // from this sender") arrives as ?accountId=&sender=, seeding these filters
+  // the same way the rest of the page manages them from then on.
+  const [searchParams] = useSearchParams()
 
-  const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null)
+  const [selectedAccountId, setSelectedAccountId] = useState<number | null>(() => {
+    const raw = searchParams.get('accountId')
+    const parsed = raw ? Number(raw) : NaN
+    return Number.isFinite(parsed) ? parsed : null
+  })
   const [view, setView] = useState<string | null>(null)
   const [category, setCategory] = useState<string | null>(null)
-  const [sender, setSender] = useState<string | null>(null)
+  const [sender, setSender] = useState<string | null>(() => searchParams.get('sender'))
   const [searchInput, setSearchInput] = useState('')
   const [search, setSearch] = useState('')
+  const [selected, setSelected] = useState<Set<string>>(new Set())
   const loadMoreRef = useRef<HTMLDivElement | null>(null)
 
   const accountsQuery = useQuery({ queryKey: ['accounts'], queryFn: getAccounts })
@@ -100,6 +111,18 @@ export function InboxPage() {
     [messagesQuery.data],
   )
 
+  // Rows that scrolled out of the current filter/page set can't stay selected.
+  useEffect(() => {
+    const ids = new Set(messages.map((m) => m.id))
+    setSelected((prev) => {
+      const next = new Set<string>()
+      prev.forEach((id) => {
+        if (ids.has(id)) next.add(id)
+      })
+      return next.size === prev.size ? prev : next
+    })
+  }, [messages])
+
   useEffect(() => {
     const el = loadMoreRef.current
     if (!el) return
@@ -139,11 +162,57 @@ export function InboxPage() {
     onSuccess: (_d, messageId) => patchMessages((m) => (m.id === messageId ? null : m)),
   })
 
-  const seenMutation = useMutation({
-    mutationFn: (messageId: string) =>
-      setMessageFlag(selectedAccountId as number, messageId, FOLDER, '\\Seen', true),
-    onSuccess: (_d, messageId) => patchMessages((m) => (m.id === messageId ? { ...m, seen: true } : m)),
+  const bulkDeleteMutation = useMutation({
+    mutationFn: (ids: string[]) => bulkDeleteMessages(selectedAccountId as number, FOLDER, ids),
+    onSuccess: (result, ids) => {
+      const failed = new Set(result.failed ?? [])
+      const succeeded = new Set(ids.filter((id) => !failed.has(id)))
+      patchMessages((m) => (succeeded.has(m.id) ? null : m))
+      setSelected(new Set())
+    },
   })
+
+  const bulkFlagMutation = useMutation({
+    mutationFn: ({ ids, flag, value }: { ids: string[]; flag: '\\Seen' | '\\Flagged'; value: boolean }) =>
+      bulkSetMessageFlag(selectedAccountId as number, FOLDER, ids, flag, value).then((result) => ({
+        result,
+        flag,
+        value,
+      })),
+    onSuccess: ({ result, flag, value }, { ids }) => {
+      const failed = new Set(result.failed ?? [])
+      const succeeded = new Set(ids.filter((id) => !failed.has(id)))
+      const key = flag === '\\Seen' ? 'seen' : 'flagged'
+      patchMessages((m) => (succeeded.has(m.id) ? { ...m, [key]: value } : m))
+      setSelected(new Set())
+    },
+  })
+
+  const bulkBusy = bulkDeleteMutation.isPending || bulkFlagMutation.isPending
+
+  function toggleSelectRow(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function toggleSelectAll() {
+    setSelected((prev) => (prev.size === messages.length ? new Set() : new Set(messages.map((m) => m.id))))
+  }
+
+  function handleBulkDelete() {
+    if (selected.size === 0) return
+    if (
+      !confirm(
+        `Delete ${selected.size} message${selected.size !== 1 ? 's' : ''}? They move to Trash on your mail server.`,
+      )
+    )
+      return
+    bulkDeleteMutation.mutate([...selected])
+  }
 
   const syncMutation = useMutation({
     mutationFn: () => startSync(selectedAccountId as number, FOLDER),
@@ -157,8 +226,10 @@ export function InboxPage() {
 
   function handleOpen(message: MessageSummary) {
     if (selectedAccountId === null) return
-    if (!message.seen) seenMutation.mutate(message.id)
-    navigate(`/mail/messages/${selectedAccountId}/${message.id}`)
+    // Opening the message is what marks it read now — the detail request sets
+    // \Seen server-side and mirrors it into the index, so flagging it from here
+    // would only cost a second IMAP session for the same result.
+    navigate(`/mail/messages/${selectedAccountId}/${message.id}?folder=${encodeURIComponent(FOLDER)}`)
   }
 
   function resetFilters() {
@@ -300,12 +371,81 @@ export function InboxPage() {
             </div>
           )}
 
+          {messages.length > 0 && (
+            <div className="flex items-center gap-3 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2">
+              <input
+                type="checkbox"
+                checked={selected.size === messages.length}
+                onChange={toggleSelectAll}
+                aria-label={selected.size === messages.length ? 'Deselect all' : 'Select all'}
+                className="h-3.5 w-3.5 accent-[var(--color-accent)]"
+              />
+              {selected.size > 0 ? (
+                <>
+                  <span className="text-sm font-medium text-[var(--color-text)]">{selected.size} selected</span>
+                  <div className="flex-1" />
+                  <button
+                    type="button"
+                    onClick={() => bulkFlagMutation.mutate({ ids: [...selected], flag: '\\Seen', value: true })}
+                    disabled={bulkBusy}
+                    className="rounded-lg px-2.5 py-1 text-xs font-medium text-[var(--color-text-muted)] transition hover:bg-[var(--color-bg)] disabled:opacity-50"
+                  >
+                    Mark read
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => bulkFlagMutation.mutate({ ids: [...selected], flag: '\\Seen', value: false })}
+                    disabled={bulkBusy}
+                    className="rounded-lg px-2.5 py-1 text-xs font-medium text-[var(--color-text-muted)] transition hover:bg-[var(--color-bg)] disabled:opacity-50"
+                  >
+                    Mark unread
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => bulkFlagMutation.mutate({ ids: [...selected], flag: '\\Flagged', value: true })}
+                    disabled={bulkBusy}
+                    className="rounded-lg px-2.5 py-1 text-xs font-medium text-[var(--color-text-muted)] transition hover:bg-[var(--color-bg)] disabled:opacity-50"
+                  >
+                    Flag
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => bulkFlagMutation.mutate({ ids: [...selected], flag: '\\Flagged', value: false })}
+                    disabled={bulkBusy}
+                    className="rounded-lg px-2.5 py-1 text-xs font-medium text-[var(--color-text-muted)] transition hover:bg-[var(--color-bg)] disabled:opacity-50"
+                  >
+                    Unflag
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleBulkDelete}
+                    disabled={bulkBusy}
+                    className="rounded-lg px-2.5 py-1 text-xs font-medium text-[var(--color-negative)] transition hover:bg-[var(--color-negative-tint)] disabled:opacity-50"
+                  >
+                    {bulkDeleteMutation.isPending ? <Spinner className="h-3 w-3" /> : 'Delete'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelected(new Set())}
+                    className="rounded-lg px-2.5 py-1 text-xs font-medium text-[var(--color-text-subtle)] transition hover:bg-[var(--color-bg)]"
+                  >
+                    Clear
+                  </button>
+                </>
+              ) : (
+                <span className="text-xs text-[var(--color-text-subtle)]">Select all</span>
+              )}
+            </div>
+          )}
+
           <div className="bg-[var(--color-surface)]">
             {messages.map((message) => (
               <MessageRow
                 key={message.id}
                 accountId={selectedAccountId as number}
                 message={message}
+                selected={selected.has(message.id)}
+                onToggleSelect={() => toggleSelectRow(message.id)}
                 onOpen={() => handleOpen(message)}
                 onToggleFlag={() =>
                   flagMutation.mutate({ messageId: message.id, value: !message.flagged })

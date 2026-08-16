@@ -102,6 +102,10 @@ func (p *AnthropicProvider) complete(ctx context.Context, prompt string, maxToke
 	return "", fmt.Errorf("anthropic: response contained no text block")
 }
 
+func (p *AnthropicProvider) Complete(ctx context.Context, prompt string, maxTokens int) (string, error) {
+	return p.complete(ctx, prompt, maxTokens)
+}
+
 func (p *AnthropicProvider) Summarize(ctx context.Context, subject, bodyPreview string) (string, error) {
 	if len(bodyPreview) > MaxBodyPreviewChars {
 		bodyPreview = bodyPreview[:MaxBodyPreviewChars]

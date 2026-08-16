@@ -1,13 +1,54 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Search, Trash2, Tag, X, Loader2, Shuffle } from 'lucide-react'
+import {
+  Search,
+  Trash2,
+  Tag,
+  X,
+  Loader2,
+  Shuffle,
+  Mail,
+  ArrowLeftRight,
+  Sparkles,
+  Users,
+  TrendingUp,
+  AlertTriangle,
+} from 'lucide-react'
 import { api } from '../api'
 import { formatINR, formatDate } from '../lib/format'
 import { EditTransactionModal } from '../components/EditTransactionModal'
-import type { Transaction } from '../types'
+import { TRANSFER_KIND_LABELS } from '../types'
+import type { ClassifyStatus, Transaction } from '../types'
+
+/** Live progress of a running classification pass. */
+function ClassifyProgress({ status }: { status?: ClassifyStatus }) {
+  const done = status?.progress?.done ?? 0
+  const total = status?.progress?.total ?? 0
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0
+  return (
+    <div className="flex items-center gap-3">
+      <Loader2 size={14} className="shrink-0 animate-spin text-[var(--color-accent-2)]" />
+      <span className="shrink-0">
+        Reading transactions{total > 0 ? ` — ${done} of ${total}` : '…'}
+      </span>
+      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-[var(--color-hover)]">
+        <div
+          className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-500"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  )
+}
 
 export function Transactions() {
   const queryClient = useQueryClient()
+
+  // Arriving from a message in Mail: ?txn=<id> highlights that transaction.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const highlightId = Number(searchParams.get('txn')) || null
+  const highlightRef = useRef<HTMLTableRowElement>(null)
 
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
@@ -18,6 +59,9 @@ export function Transactions() {
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [editing, setEditing] = useState<Transaction | null>(null)
   const [showCategoryMenu, setShowCategoryMenu] = useState(false)
+  const [showTransferMenu, setShowTransferMenu] = useState(false)
+  const [classifyError, setClassifyError] = useState<string | null>(null)
+  const [spreadNote, setSpreadNote] = useState<string | null>(null)
 
   // Only the free-text box is debounced; the dropdowns fire immediately.
   useEffect(() => {
@@ -52,6 +96,22 @@ export function Transactions() {
     })
   }, [transactions])
 
+  // The linked transaction may be older than the 200 rows the list loads, so
+  // fetch it directly rather than hoping it happens to be on this page.
+  const highlighted = useQuery({
+    queryKey: ['money', 'transaction', highlightId],
+    queryFn: () => api.transactions.get(highlightId as number),
+    enabled: highlightId != null,
+  })
+
+  const highlightInList = transactions.some((t) => t.id === highlightId)
+
+  useEffect(() => {
+    if (highlightId != null && highlightInList) {
+      highlightRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    }
+  }, [highlightId, highlightInList])
+
   const invalidateMoney = () => queryClient.invalidateQueries({ queryKey: ['money'] })
   const afterBulk = () => {
     setSelected(new Set())
@@ -65,17 +125,60 @@ export function Transactions() {
   const bulkCategorizeMutation = useMutation({
     mutationFn: ({ ids, catId }: { ids: number[]; catId: number | null }) =>
       api.transactions.bulkCategorize(ids, catId),
-    onSuccess: afterBulk,
+    onSuccess: (res) => {
+      // Say so when the choice reached rows the user didn't select — silently
+      // editing thirty other rows would be alarming to discover later.
+      if (res.matched > 0) {
+        setClassifyError(null)
+        setSpreadNote(
+          `Applied to ${res.matched} more transaction${res.matched === 1 ? '' : 's'} with the same description.`,
+        )
+      }
+      afterBulk()
+    },
   })
   const linkTransferMutation = useMutation({
     mutationFn: ({ a, b }: { a: number; b: number }) => api.transactions.linkTransfer(a, b),
     onSuccess: afterBulk,
   })
+  const markTransferMutation = useMutation({
+    mutationFn: ({ ids, kind, counterparty }: { ids: number[]; kind: string; counterparty: string }) =>
+      api.transactions.bulkMarkTransfer(ids, kind, counterparty),
+    onSuccess: afterBulk,
+  })
+  // Classification runs detached — one model call per transaction — so the
+  // page polls for progress the way Mail's inbox does, quickly while a pass
+  // is running and lazily once it settles.
+  const classifyStatus = useQuery({
+    queryKey: ['money', 'classifyStatus'],
+    queryFn: api.transactions.classifyStatus,
+    refetchInterval: (q) => (q.state.data?.running ? 2000 : 30000),
+  })
+
+  const classifyRunning = classifyStatus.data?.running ?? false
+  const classifiedCount = classifyStatus.data?.classified ?? 0
+
+  // A running pass rewrites categories and merchants underneath the list;
+  // refresh as it makes progress rather than leaving stale rows on screen.
+  useEffect(() => {
+    queryClient.invalidateQueries({ queryKey: ['money', 'transactions'] })
+  }, [classifyRunning, classifiedCount, queryClient])
+
+  const classifyMutation = useMutation({
+    mutationFn: (ids: number[]) => api.transactions.classify(ids.length > 0 ? ids : undefined),
+    onSuccess: () => {
+      setClassifyError(null)
+      setSelected(new Set())
+      classifyStatus.refetch()
+    },
+    onError: (e) => setClassifyError(e instanceof Error ? e.message : 'Classification failed'),
+  })
 
   const bulkBusy =
     bulkDeleteMutation.isPending ||
     bulkCategorizeMutation.isPending ||
-    linkTransferMutation.isPending
+    linkTransferMutation.isPending ||
+    markTransferMutation.isPending
 
   function toggleRow(id: number) {
     setSelected((prev) => {
@@ -105,6 +208,20 @@ export function Transactions() {
     bulkCategorizeMutation.mutate({ ids: [...selected], catId })
   }
 
+  function handleMarkTransfer(kind: string) {
+    if (selected.size === 0) return
+    setShowTransferMenu(false)
+    // Family and investment transfers have someone/something on the other
+    // side worth recording; a quick prompt beats a second modal.
+    let counterparty = ''
+    if (kind === 'family' || kind === 'investment') {
+      counterparty =
+        prompt(kind === 'family' ? 'Who is this for? (e.g. Mom)' : 'Where did it go? (e.g. Zerodha)') ??
+        ''
+    }
+    markTransferMutation.mutate({ ids: [...selected], kind, counterparty })
+  }
+
   const selectedTxns = transactions.filter((t) => selected.has(t.id))
   const canLinkTransfer =
     selectedTxns.length === 2 && selectedTxns[0].accountId !== selectedTxns[1].accountId
@@ -118,12 +235,105 @@ export function Transactions() {
 
   return (
     <div className="p-8 max-w-[1500px] mx-auto">
-      <div className="mb-6">
-        <h1 className="text-2xl font-semibold tracking-tight">Transactions</h1>
-        <p className="text-[var(--color-text-muted)] text-sm mt-1">
-          {transactions.length} transaction{transactions.length !== 1 ? 's' : ''}
-        </p>
+      <div className="mb-6 flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Transactions</h1>
+          <p className="text-[var(--color-text-muted)] text-sm mt-1">
+            {transactions.length} transaction{transactions.length !== 1 ? 's' : ''}
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          {classifyStatus.data && classifyStatus.data.pending > 0 && !classifyRunning && (
+            <span className="text-xs text-[var(--color-text-muted)]">
+              {classifyStatus.data.pending} unclassified
+            </span>
+          )}
+          <button
+            onClick={() => classifyMutation.mutate([...selected])}
+            disabled={classifyRunning || classifyMutation.isPending}
+            title={
+              selected.size > 0
+                ? `Re-classify the ${selected.size} selected transactions`
+                : 'Classify every transaction that has not been read yet'
+            }
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[var(--color-accent)] text-white text-sm font-medium hover:bg-[var(--color-accent-hover)] disabled:opacity-50 transition-colors"
+          >
+            {classifyRunning || classifyMutation.isPending ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <Sparkles size={16} />
+            )}
+            {selected.size > 0 ? 'Classify selected' : 'Classify with AI'}
+          </button>
+        </div>
       </div>
+
+      {spreadNote && (
+        <div className="mb-4 flex items-center gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2.5 text-sm">
+          <Tag size={14} className="shrink-0 text-[var(--color-accent-2)]" />
+          <span className="flex-1">{spreadNote}</span>
+          <button
+            onClick={() => setSpreadNote(null)}
+            className="rounded-lg p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-hover)]"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
+      {(classifyRunning || classifyError || classifyStatus.data?.error) && (
+        <div className="mb-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2.5 text-sm">
+          {classifyError || classifyStatus.data?.error ? (
+            <div className="flex items-center gap-3">
+              <AlertTriangle size={14} className="shrink-0 text-[var(--color-negative)]" />
+              <span className="flex-1 text-[var(--color-negative)]">
+                {classifyError || classifyStatus.data?.error}
+              </span>
+              <button
+                onClick={() => setClassifyError(null)}
+                className="rounded-lg p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-hover)]"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          ) : (
+            <ClassifyProgress status={classifyStatus.data} />
+          )}
+        </div>
+      )}
+
+      {highlightId != null && highlighted.data && (
+        <div className="mb-5 flex flex-wrap items-center gap-3 rounded-xl border border-[var(--color-accent)] bg-[var(--color-accent-tint)] px-4 py-3">
+          <ArrowLeftRight size={16} className="shrink-0 text-[var(--color-accent-2)]" />
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium">
+              {highlighted.data.merchant || highlighted.data.narration}
+            </div>
+            <div className="text-xs text-[var(--color-text-muted)]">
+              {formatDate(highlighted.data.txnDate)} · {highlighted.data.accountName} ·{' '}
+              {formatINR(highlighted.data.withdrawalAmt + highlighted.data.depositAmt)}
+              {!highlightInList && ' · outside the current filter'}
+            </div>
+          </div>
+          {highlighted.data.sourceEmail && (
+            <Link
+              to={`/mail/messages/${highlighted.data.sourceEmail.mailAccountId}/${highlighted.data.sourceEmail.uid}`}
+              className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--color-hover)]"
+            >
+              <Mail size={13} />
+              Back to email
+            </Link>
+          )}
+          <button
+            type="button"
+            onClick={() => setSearchParams({}, { replace: true })}
+            aria-label="Dismiss linked transaction"
+            className="rounded-lg p-1.5 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-hover)] hover:text-[var(--color-text)]"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       <div className="flex flex-wrap gap-3 mb-5">
         <div className="relative flex-1 min-w-[220px]">
@@ -190,6 +400,41 @@ export function Transactions() {
               Link as transfer
             </button>
           )}
+          <div className="relative">
+            <button
+              onClick={() => setShowTransferMenu((v) => !v)}
+              disabled={bulkBusy}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--color-border)] text-xs font-medium hover:bg-[var(--color-hover)] disabled:opacity-50"
+            >
+              <ArrowLeftRight size={13} />
+              Mark as transfer
+            </button>
+            {showTransferMenu && (
+              <div className="absolute right-0 top-full mt-1 w-56 bg-[var(--color-surface-2)] border border-[var(--color-border)] rounded-lg shadow-xl z-10 py-1">
+                <button
+                  onClick={() => handleMarkTransfer('self')}
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-[var(--color-hover)] flex items-center gap-2"
+                >
+                  <Shuffle size={13} className="text-[var(--color-text-muted)]" />
+                  Between my accounts
+                </button>
+                <button
+                  onClick={() => handleMarkTransfer('investment')}
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-[var(--color-hover)] flex items-center gap-2"
+                >
+                  <TrendingUp size={13} className="text-[var(--color-text-muted)]" />
+                  To investment
+                </button>
+                <button
+                  onClick={() => handleMarkTransfer('family')}
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-[var(--color-hover)] flex items-center gap-2"
+                >
+                  <Users size={13} className="text-[var(--color-text-muted)]" />
+                  To family
+                </button>
+              </div>
+            )}
+          </div>
           <div className="relative">
             <button
               onClick={() => setShowCategoryMenu((v) => !v)}
@@ -274,7 +519,14 @@ export function Transactions() {
                 transactions.map((t) => (
                   <tr
                     key={t.id}
-                    className={`border-t border-[var(--color-border)] hover:bg-white/[0.02] transition-colors cursor-pointer ${selected.has(t.id) ? 'bg-[var(--color-accent)]/5' : ''}`}
+                    ref={t.id === highlightId ? highlightRef : undefined}
+                    className={`border-t border-[var(--color-border)] hover:bg-[var(--color-hover)] transition-colors cursor-pointer ${
+                      t.id === highlightId
+                        ? 'bg-[var(--color-accent-tint)] ring-1 ring-inset ring-[var(--color-accent)]'
+                        : selected.has(t.id)
+                          ? 'bg-[var(--color-hover)]'
+                          : ''
+                    }`}
                     onClick={() => setEditing(t)}
                   >
                     <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
@@ -295,6 +547,17 @@ export function Transactions() {
                           {t.narration}
                         </div>
                       )}
+                      {t.sourceEmail && (
+                        <Link
+                          to={`/mail/messages/${t.sourceEmail.mailAccountId}/${t.sourceEmail.uid}`}
+                          onClick={(e) => e.stopPropagation()}
+                          title={t.sourceEmail.subject}
+                          className="mt-1 inline-flex max-w-full items-center gap-1 text-xs text-[var(--color-accent-2)] hover:underline"
+                        >
+                          <Mail size={11} className="shrink-0" />
+                          <span className="truncate">Source email</span>
+                        </Link>
+                      )}
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap text-[var(--color-text-muted)]">
                       {t.accountName}
@@ -302,8 +565,15 @@ export function Transactions() {
                     <td className="px-4 py-3 whitespace-nowrap">
                       {t.type === 'transfer' ? (
                         <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs bg-[var(--color-hover)] text-[var(--color-text-muted)]">
-                          <Shuffle size={11} />
-                          Transfer
+                          {t.transferKind === 'family' ? (
+                            <Users size={11} />
+                          ) : t.transferKind === 'investment' ? (
+                            <TrendingUp size={11} />
+                          ) : (
+                            <Shuffle size={11} />
+                          )}
+                          {TRANSFER_KIND_LABELS[t.transferKind ?? ''] ?? 'Transfer'}
+                          {t.counterparty && ` · ${t.counterparty}`}
                         </span>
                       ) : t.categoryName ? (
                         <span
@@ -317,6 +587,17 @@ export function Transactions() {
                         </span>
                       ) : (
                         <span className="text-xs text-[var(--color-text-muted)]">Uncategorized</span>
+                      )}
+                      {/* The model read this row as something other than what
+                          it is, or wasn't sure — open it to accept or ignore. */}
+                      {t.ai && !t.ai.applied && (t.ai.needsReview || t.ai.nature !== t.type) && (
+                        <span
+                          title={t.ai.summary || 'AI has a suggestion for this transaction'}
+                          className="ml-1.5 inline-flex items-center gap-1 rounded-full bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-xs text-[var(--color-accent-2)]"
+                        >
+                          <Sparkles size={10} />
+                          {t.ai.nature !== t.type ? TRANSFER_KIND_LABELS[t.ai.transferKind] ? 'transfer?' : `${t.ai.nature}?` : 'review'}
+                        </span>
                       )}
                     </td>
                     <td
