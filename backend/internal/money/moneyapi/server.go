@@ -119,6 +119,10 @@ func (s *Server) Register(mux *http.ServeMux) {
 	// for a finance ingest pass over a given mailbox.
 	mux.HandleFunc("GET /api/money/email-accounts", s.handleListEmailAccounts)
 	mux.HandleFunc("POST /api/money/email-accounts/{id}/sync", s.handleSyncEmailAccount)
+	// Recovers transactions/bills/trades stranded when their account or holding
+	// was deleted after the mail that produced them was already linked — see
+	// ingest.RescanOrphaned for why an ordinary sync can't reach them.
+	mux.HandleFunc("POST /api/money/email-accounts/{id}/rescan", s.handleRescanEmailAccount)
 
 	// Exchange rates that bring foreign holdings into the rupee net worth.
 	mux.HandleFunc("GET /api/money/fx-rates", s.handleListFXRates)

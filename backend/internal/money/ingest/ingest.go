@@ -182,6 +182,10 @@ func processOne(db *sql.DB, accountID int64, c candidate, raw []byte, result *Re
 
 	outcome := PersistWithPasswords(db, emailparse.InstitutionForSender(parsed.From), parsed, lookup)
 	parsedAs, txnID, billID := outcome.ParsedAs, outcome.TransactionID, outcome.BillID
+	var investmentID *int64
+	if outcome.InvestmentID != 0 {
+		investmentID = &outcome.InvestmentID
+	}
 
 	switch parsedAs {
 	case "transaction":
@@ -214,11 +218,11 @@ func processOne(db *sql.DB, accountID int64, c candidate, raw []byte, result *Re
 	res, err := db.Exec(`
 		INSERT INTO message_links
 			(mail_account_id, message_id, rfc_message_id, uid, sender, subject,
-			 received_at, parsed_as, transaction_id, bill_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 received_at, parsed_as, transaction_id, bill_id, investment_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(mail_account_id, rfc_message_id) DO NOTHING`,
 		accountID, c.messageID, rfcID, c.uid, parsed.From, parsed.Subject,
-		parsed.Date, parsedAs, txnID, billID)
+		parsed.Date, parsedAs, txnID, billID, investmentID)
 	if err != nil {
 		return fmt.Errorf("linking message %d: %w", c.messageID, err)
 	}
@@ -279,6 +283,33 @@ func selectCandidates(db *sql.DB, accountID int64, folder string) ([]candidate, 
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// RescanOrphaned clears message_links rows left pointing at nothing: a
+// message that was correctly read as a transaction, bill, or trade, whose
+// target row was later deleted (an account's transactions cascade away with
+// it; bills and trades instead survive with their link column set to NULL).
+// Once a message has any message_links row, selectCandidates never looks at
+// it again — so without this, recreating the account does not bring the old
+// mail back, only new mail from here on.
+//
+// It only removes links whose target is confirmed gone (transaction_id/
+// bill_id/investment_id IS NULL for that parsed_as), never a link that still
+// points at a real row, so a rescan cannot relabel or duplicate anything that
+// is already correct.
+func RescanOrphaned(db *sql.DB, mailAccountID int64) (int64, error) {
+	res, err := db.Exec(`
+		DELETE FROM message_links
+		WHERE mail_account_id = ?
+		  AND ((parsed_as = 'transaction' AND transaction_id IS NULL)
+		    OR (parsed_as = 'bill' AND bill_id IS NULL)
+		    OR (parsed_as = 'trade' AND investment_id IS NULL))`,
+		mailAccountID)
+	if err != nil {
+		return 0, fmt.Errorf("clearing orphaned links: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // pendingAccountOutcome marks a message that was understood but names an

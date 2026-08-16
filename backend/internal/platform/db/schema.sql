@@ -398,9 +398,13 @@ CREATE TABLE IF NOT EXISTS message_links (
     sender          TEXT NOT NULL DEFAULT '',
     subject         TEXT NOT NULL DEFAULT '',
     received_at     TEXT NOT NULL DEFAULT '',
-    parsed_as       TEXT NOT NULL DEFAULT '',      -- transaction | bill | unrecognized
+    parsed_as       TEXT NOT NULL DEFAULT '',      -- transaction | bill | trade | unrecognized
     transaction_id  INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
     bill_id         INTEGER REFERENCES bills(id) ON DELETE SET NULL,
+    -- Set when parsed_as='trade'. Mirrors transaction_id/bill_id so a deleted
+    -- holding orphans its link the same way a deleted account orphans a
+    -- transaction's — which is what lets Rescan find and retry it.
+    investment_id   INTEGER REFERENCES investments(id) ON DELETE SET NULL,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

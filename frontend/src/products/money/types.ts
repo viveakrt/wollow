@@ -439,6 +439,17 @@ export interface SyncResult {
   failed: number
 }
 
+/**
+ * A rescan clears message links whose transaction, bill, or trade was
+ * deleted (typically the account or holding it belonged to was deleted,
+ * cascading the transaction away with it) and re-ingests them, since an
+ * ordinary sync never looks at an already-linked message again.
+ */
+export interface RescanResult extends SyncResult {
+  /** Stale links cleared before re-ingesting — recovered history, not new mail. */
+  cleared: number
+}
+
 export interface ImportPreview {
   /** Which confirm step applies: a transaction export, or a deposit summary. */
   kind: 'statement' | 'deposits'

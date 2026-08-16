@@ -16,6 +16,7 @@ import type {
   Bill,
   FXRate,
   SyncResult,
+  RescanResult,
   TransferSuggestion,
   PDFPassword,
 } from './types'
@@ -159,6 +160,10 @@ export const api = {
   emailAccounts: {
     list: () => http.get<EmailAccount[]>(`${BASE}/email-accounts`),
     sync: (id: number) => http.post<SyncResult>(`${BASE}/email-accounts/${id}/sync`),
+    // Recovers transactions/bills/trades stranded when their account or
+    // holding was deleted after the mail that produced them was already
+    // linked — a plain sync never revisits an already-linked message.
+    rescan: (id: number) => http.post<RescanResult>(`${BASE}/email-accounts/${id}/rescan`),
   },
   // Exchange rates that bring foreign holdings into the rupee net worth.
   // Either the user set one, or it was derived from their own forex

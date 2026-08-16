@@ -78,6 +78,54 @@ func (s *Server) handleSyncEmailAccount(w http.ResponseWriter, r *http.Request) 
 	httpx.WriteJSON(w, 200, result)
 }
 
+// rescanResult is handleSyncEmailAccount's result with one extra figure: how
+// many stale links this pass cleared before rescanning, so the UI can say
+// "recovered 39 transactions" instead of just "found 39" as if they were new.
+type rescanResult struct {
+	Cleared int64 `json:"cleared"`
+	*ingest.Result
+}
+
+// handleRescanEmailAccount repairs the gap a deleted account leaves behind:
+// once a message is linked, an ordinary sync never looks at it again, so a
+// transaction/bill/trade whose account or holding was deleted stays lost even
+// after the account is recreated. This clears exactly those orphaned links
+// (see ingest.RescanOrphaned — never a link still pointing at a real row) and
+// immediately re-ingests them, so recreating the account recovers the history
+// in one action instead of leaving it stranded.
+func (s *Server) handleRescanEmailAccount(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		httpx.WriteError(w, 400, "invalid id")
+		return
+	}
+
+	var exists int
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM mail_accounts WHERE id = ?`, id).Scan(&exists); err != nil || exists == 0 {
+		httpx.WriteError(w, 404, "mailbox not found")
+		return
+	}
+
+	cleared, err := ingest.RescanOrphaned(s.DB, id)
+	if err != nil {
+		httpx.WriteError(w, 500, err.Error())
+		return
+	}
+
+	var result *ingest.Result
+	err = s.withMailSession(r.Context(), id, func(fetcher ingest.RawFetcher) error {
+		var runErr error
+		result, runErr = ingest.RunWithPasswords(r.Context(), s.DB, fetcher, id, "INBOX", s.PDFPasswordLookup())
+		return runErr
+	})
+	if err != nil {
+		httpx.WriteError(w, 502, "rescan failed: "+err.Error())
+		return
+	}
+
+	httpx.WriteJSON(w, 200, rescanResult{Cleared: cleared, Result: result})
+}
+
 func (s *Server) handleListBills(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.DB.Query(`
 		SELECT id, account_id, issuer, card_last4, statement_period, total_due, minimum_due, due_date, status, created_at

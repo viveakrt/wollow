@@ -9,16 +9,18 @@ import {
   AlertCircle,
   KeyRound,
   ArrowRight,
+  History,
 } from 'lucide-react'
 import { api } from '../api'
 import { Card } from '../components/Card'
-import type { SyncResult } from '../types'
+import type { SyncResult, RescanResult } from '../types'
 
 const KNOWN_ISSUERS = ['HDFC', 'ICICI', 'Axis', 'BOBCARD']
 
 export function MoneySettings() {
   const queryClient = useQueryClient()
   const [lastSync, setLastSync] = useState<{ id: number; result: SyncResult } | null>(null)
+  const [lastRescan, setLastRescan] = useState<{ id: number; result: RescanResult } | null>(null)
   const [pdfIssuer, setPdfIssuer] = useState(KNOWN_ISSUERS[0])
   const [pdfPassword, setPdfPassword] = useState('')
   const [parseResult, setParseResult] = useState<{ parsed: number; failed: number } | null>(null)
@@ -40,6 +42,14 @@ export function MoneySettings() {
     },
   })
 
+  const rescanMutation = useMutation({
+    mutationFn: api.emailAccounts.rescan,
+    onSuccess: (result, id) => {
+      setLastRescan({ id, result })
+      queryClient.invalidateQueries({ queryKey: ['money'] })
+    },
+  })
+
   const savePassword = useMutation({
     mutationFn: () => api.pdfPasswords.set(pdfIssuer, pdfPassword),
     onSuccess: () => {
@@ -53,7 +63,7 @@ export function MoneySettings() {
     onSuccess: setParseResult,
   })
 
-  const error = syncMutation.error ?? savePassword.error ?? parsePending.error
+  const error = syncMutation.error ?? rescanMutation.error ?? savePassword.error ?? parsePending.error
 
   return (
     <div className="mx-auto max-w-3xl p-8">
@@ -116,23 +126,47 @@ export function MoneySettings() {
                       )}
                     </>
                   )}
+                  {lastRescan?.id === account.id && (
+                    <div className="mt-1 flex items-center gap-1.5 text-xs text-[var(--color-positive)]">
+                      <CheckCircle2 size={12} />
+                      {lastRescan.result.cleared === 0
+                        ? 'Nothing stranded — every recognized message still has its transaction, bill, or trade.'
+                        : `Recovered ${lastRescan.result.transactions} transaction${lastRescan.result.transactions !== 1 ? 's' : ''}, ${lastRescan.result.bills} bill${lastRescan.result.bills !== 1 ? 's' : ''} from ${lastRescan.result.cleared} stranded message${lastRescan.result.cleared !== 1 ? 's' : ''}.`}
+                    </div>
+                  )}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => syncMutation.mutate(account.id)}
-                  disabled={syncMutation.isPending && syncMutation.variables === account.id}
-                  className="ml-3 flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--color-hover)] disabled:opacity-50"
-                >
-                  <RefreshCw
-                    size={13}
-                    className={
-                      syncMutation.isPending && syncMutation.variables === account.id
-                        ? 'animate-spin'
-                        : ''
-                    }
-                  />
-                  Scan now
-                </button>
+                <div className="ml-3 flex shrink-0 items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => rescanMutation.mutate(account.id)}
+                    disabled={rescanMutation.isPending && rescanMutation.variables === account.id}
+                    title="Recover transactions, bills, and trades left stranded by a deleted account or holding"
+                    className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--color-hover)] disabled:opacity-50"
+                  >
+                    {rescanMutation.isPending && rescanMutation.variables === account.id ? (
+                      <Loader2 size={13} className="animate-spin" />
+                    ) : (
+                      <History size={13} />
+                    )}
+                    Rescan
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => syncMutation.mutate(account.id)}
+                    disabled={syncMutation.isPending && syncMutation.variables === account.id}
+                    className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-medium transition-colors hover:bg-[var(--color-hover)] disabled:opacity-50"
+                  >
+                    <RefreshCw
+                      size={13}
+                      className={
+                        syncMutation.isPending && syncMutation.variables === account.id
+                          ? 'animate-spin'
+                          : ''
+                      }
+                    />
+                    Scan now
+                  </button>
+                </div>
               </div>
             ))}
           </div>

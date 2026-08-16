@@ -71,6 +71,7 @@ var columnMigrations = []columnMigration{
 	{"mail_accounts", "enabled", "INTEGER NOT NULL DEFAULT 1"},
 	{"messages", "rfc_message_id", "TEXT NOT NULL DEFAULT ''"},
 	{"message_links", "message_id", "INTEGER REFERENCES messages(id) ON DELETE SET NULL"},
+	{"message_links", "investment_id", "INTEGER REFERENCES investments(id) ON DELETE SET NULL"},
 	{"transactions", "linked_txn_id", "INTEGER REFERENCES transactions(id) ON DELETE SET NULL"},
 	{"transactions", "transfer_kind", "TEXT NOT NULL DEFAULT ''"},
 	{"transactions", "counterparty", "TEXT NOT NULL DEFAULT ''"},
