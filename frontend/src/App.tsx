@@ -18,6 +18,8 @@ import { Bills } from './products/money/pages/Bills'
 import { Transfers } from './products/money/pages/Transfers'
 import { Investments } from './products/money/pages/Investments'
 import { MoneySettings } from './products/money/pages/MoneySettings'
+import { Parsers } from './products/money/pages/Parsers'
+import { ParserEditor } from './products/money/pages/ParserEditor'
 
 /**
  * Mail manages its own full-height panes (account sidebar, message list, detail),
@@ -93,6 +95,9 @@ export default function App() {
         <Route path="/money/import" element={<ImportStatement />} />
         <Route path="/money/settings" element={<MoneySettings />} />
         <Route path="/money/investments" element={<Investments />} />
+        <Route path="/money/parsers" element={<Parsers />} />
+        <Route path="/money/parsers/new" element={<ParserEditor />} />
+        <Route path="/money/parsers/:id" element={<ParserEditor />} />
       </Route>
 
       <Route

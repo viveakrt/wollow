@@ -24,10 +24,12 @@ reads the same message index Mail builds.
 ## Status
 
 Early but real. Mail syncs, classifies, and renders full messages with their
-attachments. Money imports HDFC account, PPF and fixed-deposit exports, reads
-bank/card/wallet alert mail into transactions, statement mail into bill
-reminders, and balance-update mail into the balances themselves. Google/Microsoft
-OAuth, mobile, and desktop targets are on the roadmap.
+attachments. Money imports HDFC account, PPF and fixed-deposit exports and
+Zerodha Console P&L exports, and reads bank/card/wallet alert mail into
+transactions, statement mail into bill reminders, balance-update mail into the
+balances themselves and broker order mail into holdings — through parsers you
+define from the UI on one real email each. Google/Microsoft OAuth, mobile, and
+desktop targets are on the roadmap.
 
 ## Architecture
 
@@ -43,12 +45,12 @@ OAuth, mobile, and desktop targets are on the roadmap.
 backend/internal/
   platform/     config · auth · crypto · db · httpx · platformapi
   mail/         provider · imap · sync · ai · classifier · mailapi
-  money/        parsers · emailparse · pdfparse · ledger · ingest · moneyapi
+  money/        parsers · emailparse · parserules · pdfparse · ledger · ingest · moneyapi
 
 frontend/src/
   platform/     apiClient · auth · theme · queryClient · AppShell
   products/mail/    Inbox · MessageDetail · Senders · ConnectAccount · MailSidebar
-  products/money/   Dashboard · Accounts · Transactions · Investments · Bills · Import · Transfers
+  products/money/   Dashboard · Accounts · Transactions · Investments · Bills · Parsers · Import · Transfers
 ```
 
 `platform/` is shared; the two product trees never import each other. The shell
@@ -121,39 +123,60 @@ the same per-mailbox lock. One mailbox costs one IMAP session, no matter how man
 products are reading it. `internal/mail/imap.go` is the only file in the
 repository that imports an IMAP client.
 
-A message qualifies as finance mail if it is from a known issuer domain **or**
-the AI classifier flagged it `is_transactional`. That second arm is the point of
-reading the index: it surfaces issuers no parser has been taught, which land as
-`parsed_as = 'unrecognized'` rather than being silently skipped.
+A message qualifies as finance mail if it is from a known issuer domain, from
+a sender one of your parsers names, **or** the AI classifier flagged it
+`is_transactional`. Those last two arms are the point of reading the index:
+they surface senders the registry has never heard of, which land as
+`parsed_as = 'unrecognized'` rather than being silently skipped — and every
+such message carries a "define a parser from this email" link.
+
+### Parsers you define, not parsers we ship
+
+There are no hard-coded issuer parsers. Every bank, card, wallet and broker
+template is taught from one real email, on the **Parsers** page:
+
+1. pick a message from a connected mailbox;
+2. in its text (subject on the first line, then the body — normalized exactly
+   as ingest will see it), select the amount, the account's last digits, the
+   payee, the date, and so on, and say which is which;
+3. say what the email is — a transaction alert, a card statement, a balance
+   update or an investment order — and, for a transaction, whether money went
+   out or in;
+4. see what the draft reads out of the sender's twenty most recent messages,
+   then save.
+
+The server turns each marked value into an anchor — the shortest run of words
+before (and, where needed, after) it that identifies exactly that spot in the
+sample — with digits, whitespace, masks and addresses in the anchor generalized
+so the next message's date or VPA doesn't break it. Anchors are always literal
+text: user input never reaches the regex engine unquoted. `money/parserules`
+owns normalization, derivation and application, so the editor and ingest can't
+drift apart. A rule that matches a sender but can't read a particular message
+falls through to the next rule, which is how one sender's several templates
+coexist. Zerodha's password-protected PDF statements (contract notes, holding
+statements) are the one shape rules can't yet express; holdings from them come
+in through the Console P&L import for now.
 
 ### Knowing what you actually hold
 
 Getting the *accounts* right matters more than getting any single transaction
-right, so alert mail is mined for four separate things:
+right:
 
-- **the transaction**, by the issuer's own parser where one exists and by a
-  shared reader of the standard Indian alert phrasing everywhere else — which
-  is what lets a bank nobody has written a parser for still produce
-  transactions rather than an `unrecognized` marker.
-- **the account it belongs to**, identified by last-four digits *together with*
-  the sending institution. Four digits alone collide, and a mis-attached
-  transaction corrupts two balances at once.
-- **what kind of account it is.** Indian banks send savings alerts, card alerts
-  and loan reminders from one address, so the sender can't decide: the message
-  does. A savings-balance alert creates a bank account, "spent on credit card
-  no. XX5792" creates a card, a wallet stays a wallet.
-- **the balance and credit limit the bank stated.** A balance-update mail is
-  not a transaction, but it is the most authoritative figure the bank ever
-  sends. Those land in `balance_snapshots`, and the running balance is anchored
-  on the most recent one with only later transactions applied — so an account
-  known solely from alert mail still shows a figure the bank agrees with.
-
-An institution that mails you but has no account yet gets one created
-automatically the moment its mail names a real transaction, bill, or balance —
-nothing to approve first. It shows up on the Accounts page tagged **found in
-mail** so it stays distinguishable from one you entered by hand, and its type
-is a one-time guess from that first message: later mail never rewrites it, so
-a correction you make sticks.
+- **Mail never creates an account.** A parsed message names an account by its
+  last four digits *together with* the sending institution (four digits alone
+  collide, and a mis-attached transaction corrupts two balances at once). If no
+  such account exists, the message is held as `pending_account` — listed on the
+  Accounts and Parsers pages under "mail waiting for an account", with an
+  *Add account* button prefilled from what the mail said. Adding it releases the
+  held mail for the next sync. A rule can also be bound to one account
+  outright, for senders that never state a number (a wallet).
+- **Account types are never rewritten from mail.** The type you chose stands.
+- **Archiving retires an account** — off the Accounts page and the dashboard,
+  no longer matched by mail — while keeping its history, unlike delete.
+- **The balance and credit limit the bank stated.** A balance-update rule
+  records the figure in `balance_snapshots` rather than as a transaction, and
+  the running balance is anchored on the most recent snapshot with only later
+  transactions applied. "Set outstanding" on a card does the same by hand.
 
 Deposits and holdings — fixed deposits, PPF, mutual funds, stocks — live in
 `investments` rather than `finance_accounts`, because the facts that matter are
@@ -172,9 +195,33 @@ whatever Money made of it. That one table carries both products' cross-links:
 - a transaction shows a **Source email** link back to the message it came from
 - the dashboard's upcoming bills each link back to the statement email
 
-Messages that finance ingest examined but no parser recognized still get a link
+Messages that finance ingest examined but no rule could read still get a link
 row, labelled `unrecognized`, and still render a marker in the inbox — an
-unsupported issuer stays visible rather than silently vanishing.
+untaught issuer stays visible rather than silently vanishing. Each link also
+records which rule read the message, and a rule can be re-applied to the mail
+that arrived before it existed ("apply to old mail").
+
+### What a holding is worth
+
+Prices and exchange rates are fetched every 30 minutes, and on demand from the
+Investments page: stocks from Yahoo Finance, Indian mutual fund NAVs from AMFI's
+own daily file, and `<currency>INR=X` for the rupee rate. Only symbols and ISINs
+leave the machine — never quantities or amounts. A holding's symbol is found
+from its ISIN or its name and can be corrected by hand; `none` switches fetching
+off for it, and a quote whose currency doesn't match the holding is refused
+rather than applied, because that error would misstate the position by the
+exchange rate.
+
+A rate you type in still outranks the market one, and a rate derived from your
+own remittance is used when the market is unreachable.
+
+Profit is reported two ways: **unrealised**, today's value against what the
+remaining units cost, and **realised**, locked in by sells under a moving
+average cost — buying again after a sale never changes the profit that sale
+already made. For a foreign holding both are also stated in rupees, with each
+buy and sell converted at *its own* trade date's rate (fetched from daily
+history and stored per order), so the rupee's own movement is part of the
+answer rather than lost in a single conversion at today's rate.
 
 ### A note on table names
 
@@ -236,17 +283,19 @@ go run ./cmd/seeddemo -data ./data -samples ../statements
 
 Tests:
 ```
-cd backend  && go test ./...           # parsers, IMAP, email → transaction pipeline
+cd backend  && go test ./...             # rule derivation/application, IMAP, email → ledger pipeline
 cd frontend && npm run lint
-cd frontend && npm run test:e2e        # browser smoke test
-cd frontend && npm run test:e2e:links  # cross-product round trip
+cd frontend && npm run test:e2e          # browser smoke test
+cd frontend && npm run test:e2e:links    # cross-product round trip
+cd frontend && npm run test:e2e:parsers  # define-a-parser flow: marking values by selecting text
 ```
 See `frontend/e2e/README.md` for what the browser tests need.
 
-The Go suite runs against the real files in `statements/`: the sample emails go
-through the full parse → persist path, and the real `.xls` exports through the
-statement, PPF and fixed-deposit parsers. A schema change that breaks
-transaction, bill, balance or holding extraction fails the build.
+The rule and ingest suites are table-driven on inline sample emails (a rule
+derived from one alert must read its sibling), so they need no fixture files.
+The statement-import suite runs against the real `.xls` exports in
+`statements/`. A schema change that breaks transaction, bill, balance or
+holding extraction fails the build.
 
 ## API surface
 
@@ -265,7 +314,6 @@ session cookie.
 
 - Google & Microsoft OAuth (no app passwords needed)
 - More bank/issuer parsers; itemized PDF statement extraction
-- Live mutual fund / equity valuations (holdings are entered at cost today)
 - Native iOS, Android, and Windows desktop apps
 - Rules & filters, AI-drafted replies
 - Multi-user accounts
@@ -295,4 +343,7 @@ session cookie.
   confirm your address to the sender.
 - PDF statement attachments are stored as blobs so they can be re-parsed after
   you add an issuer password. This is a deliberate exception to the "no message
-  bodies at rest" rule the mail index otherwise follows.
+  bodies at rest" rule the mail index otherwise follows. So is the one sample
+  email each parser rule was defined on: its normalized text is kept in
+  `email_parser_rules.sample_text` so the rule can be reopened for editing
+  after the message is gone from the server. Deleting the rule deletes it.

@@ -11,6 +11,7 @@ import (
 	"net/http"
 
 	"wollow/backend/internal/money/ingest"
+	"wollow/backend/internal/money/marketdata"
 	"wollow/backend/internal/platform/crypto"
 	"wollow/backend/internal/platform/jobs"
 )
@@ -32,10 +33,15 @@ type Server struct {
 	// pass, which is one model call per transaction and so cannot run inside
 	// a request.
 	jobs *jobs.Runner
+	// Market refreshes live prices and exchange rates; tests swap its Source for a fake.
+	Market *marketdata.Refresher
 }
 
 func NewServer(database *sql.DB, box *crypto.Box, mailSession MailSession) *Server {
-	return &Server{DB: database, Box: box, mailSession: mailSession, jobs: jobs.NewRunner()}
+	return &Server{
+		DB: database, Box: box, mailSession: mailSession, jobs: jobs.NewRunner(),
+		Market: &marketdata.Refresher{DB: database, Source: marketdata.NewLive()},
+	}
 }
 
 func (s *Server) withMailSession(ctx context.Context, accountID int64, fn func(ingest.RawFetcher) error) error {
@@ -57,13 +63,32 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/money/accounts", s.handleListAccounts)
 	mux.HandleFunc("POST /api/money/accounts", s.handleCreateAccount)
 	mux.HandleFunc("POST /api/money/accounts/bulk-delete", s.handleBulkDeleteAccounts)
-	// Accounts are added by the user, never proposed by scanning the mailbox.
+	// Accounts are added by the user, never created by ingest. Mail naming an
+	// account nobody registered is held, and listed here grouped by the
+	// account it names so the user can add exactly that one.
+	mux.HandleFunc("GET /api/money/accounts/pending", s.handleListPendingAccounts)
 	// The institution list is offered so a hand-entered account records the
-	// same issuer code the parsers use, which is what lets its mail attach.
+	// same issuer code the rules use, which is what lets its mail attach.
 	mux.HandleFunc("GET /api/money/institutions", s.handleListInstitutions)
 	mux.HandleFunc("GET /api/money/accounts/{id}", s.handleGetAccount)
 	mux.HandleFunc("PUT /api/money/accounts/{id}", s.handleUpdateAccount)
 	mux.HandleFunc("DELETE /api/money/accounts/{id}", s.handleDeleteAccount)
+	mux.HandleFunc("POST /api/money/accounts/{id}/archive", s.handleArchiveAccount)
+	mux.HandleFunc("POST /api/money/accounts/{id}/unarchive", s.handleUnarchiveAccount)
+	mux.HandleFunc("POST /api/money/accounts/{id}/set-balance", s.handleSetAccountBalance)
+
+	// User-defined email parsers. A rule is derived on the server from the
+	// spans marked in a sample message, tested against recent mail from the
+	// same sender, and applied by ingest from then on.
+	mux.HandleFunc("GET /api/money/parser-rules", s.handleListParserRules)
+	mux.HandleFunc("POST /api/money/parser-rules", s.handleCreateParserRule)
+	mux.HandleFunc("GET /api/money/parser-rules/fields", s.handleParserRuleFields)
+	mux.HandleFunc("GET /api/money/parser-rules/sample", s.handleParserRuleSample)
+	mux.HandleFunc("POST /api/money/parser-rules/test", s.handleTestParserRule)
+	mux.HandleFunc("GET /api/money/parser-rules/{id}", s.handleGetParserRule)
+	mux.HandleFunc("PUT /api/money/parser-rules/{id}", s.handleUpdateParserRule)
+	mux.HandleFunc("DELETE /api/money/parser-rules/{id}", s.handleDeleteParserRule)
+	mux.HandleFunc("POST /api/money/parser-rules/{id}/rescan", s.handleRescanParserRule)
 
 	mux.HandleFunc("GET /api/money/categories", s.handleListCategories)
 	mux.HandleFunc("POST /api/money/categories", s.handleCreateCategory)
@@ -104,14 +129,19 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/money/investments/{id}/trades/{tradeId}", s.handleUpdateInvestmentTrade)
 	mux.HandleFunc("DELETE /api/money/investments/{id}/trades/{tradeId}", s.handleDeleteInvestmentTrade)
 	mux.HandleFunc("POST /api/money/investments/{id}/price", s.handleSetInvestmentPrice)
+	// Live prices (Yahoo Finance, AMFI) and exchange rates. Only symbols leave the machine.
+	mux.HandleFunc("POST /api/money/investments/refresh-prices", s.handleRefreshPrices)
+	mux.HandleFunc("GET /api/money/market/search", s.handleMarketSearch)
 
-	// One upload endpoint parses both an account statement and a deposit
-	// summary and says which it found; the commit routes differ because what
-	// they write does. The /hdfc/ prefix is kept for compatibility with links
-	// and clients that predate the deposit path.
+	// One upload endpoint parses an account statement, a deposit summary and a
+	// Zerodha Console P&L export and says which it found; the commit routes
+	// differ because what they write does. The /hdfc/ prefix is kept for
+	// compatibility with links and clients that predate the deposit/Zerodha
+	// paths.
 	mux.HandleFunc("POST /api/money/import/hdfc/preview", s.handleImportHDFCPreview)
 	mux.HandleFunc("POST /api/money/import/hdfc/commit", s.handleImportHDFCCommit)
 	mux.HandleFunc("POST /api/money/import/deposits/commit", s.handleImportDepositsCommit)
+	mux.HandleFunc("POST /api/money/import/zerodha/commit", s.handleImportZerodhaCommit)
 	mux.HandleFunc("GET /api/money/import/batches", s.handleListImportBatches)
 
 	// Mailboxes are connected and removed on the Mail side (/api/mail/accounts)
@@ -130,6 +160,8 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/money/fx-rates", s.handleSetFXRate)
 
 	mux.HandleFunc("GET /api/money/bills", s.handleListBills)
+	mux.HandleFunc("POST /api/money/bills/{id}/paid", s.handleMarkBillPaid)
+	mux.HandleFunc("POST /api/money/bills/{id}/unpaid", s.handleMarkBillUnpaid)
 
 	mux.HandleFunc("GET /api/money/pdf-passwords", s.handleListPDFPasswords)
 	mux.HandleFunc("POST /api/money/pdf-passwords", s.handleSetPDFPassword)

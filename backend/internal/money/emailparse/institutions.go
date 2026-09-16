@@ -18,10 +18,10 @@ const (
 
 // Institution is one sender the Money product knows how to attribute mail to.
 //
-// Issuer is the short code the per-issuer parsers and the bills table key on
-// and must stay stable; Name is what the UI shows. DefaultKind is only a
-// starting guess — a sender that handles both a bank account and a card (most
-// Indian banks) has its kind refined per message by KindForAlert.
+// Issuer is the short code finance_accounts.bank, the bills table and parser
+// rules key on and must stay stable; Name is what the UI shows. DefaultKind
+// is only a starting guess for the account-type picker — a sender that handles
+// both a bank account and a card (most Indian banks) is told apart per rule.
 type Institution struct {
 	Issuer      string
 	Name        string
@@ -32,8 +32,9 @@ type Institution struct {
 // institutions is the registry of senders whose mail is finance mail.
 //
 // This list is the *candidate selector*, not a parser whitelist: a sender here
-// gets its bodies pulled and run through the parsers, and anything the parsers
-// can't read still lands as 'unrecognized' rather than vanishing. Adding a
+// gets its bodies pulled and run through the user's rules, and anything no
+// rule reads still lands as 'unrecognized' rather than vanishing — which is
+// how the user finds the mail they have yet to define a parser for. Adding a
 // domain therefore costs nothing but a little bandwidth, which is why it is
 // deliberately broad.
 var institutions = []Institution{
@@ -170,62 +171,11 @@ func DisplayNameForIssuer(issuer string) string {
 	return issuer
 }
 
-// cardWords and loanWords are the vocabulary that tells which product a
-// message from a multi-product sender is actually about.
-var (
-	cardWords = []string{
-		"credit card", "creditcard", "card no", "card ending", "card number",
-		"statement for your", "available limit", "credit limit", "e-statement",
-		"total amount due", "minimum amount due", "reward point",
-	}
-	loanWords = []string{"emi", "loan account", "loan a/c", "installment due", "instalment due"}
-)
-
-// KindForAlert refines an institution's default kind using the message itself.
-//
-// Most Indian banks send savings-account alerts, card alerts and loan reminders
-// from one address, so the sender alone can't decide: "INR 1018 spent on credit
-// card no. XX5792" from a bank is a card, and a balance alert from a card
-// issuer is still a card. Only the bank default is refined upward — a wallet or
-// broker saying "card" doesn't make it one.
-func KindForAlert(inst *Institution, subject, body string) AccountKind {
-	if inst == nil {
-		return KindBank
-	}
-	if inst.DefaultKind != KindBank {
-		return inst.DefaultKind
-	}
-
-	haystack := strings.ToLower(subject + "\n" + truncateForScan(body))
-	for _, word := range loanWords {
-		if strings.Contains(haystack, word) {
-			return KindLoan
-		}
-	}
-	for _, word := range cardWords {
-		if strings.Contains(haystack, word) {
-			return KindCreditCard
-		}
-	}
-	return KindBank
-}
-
-// truncateForScan caps how much body text the keyword scans read. Alert mail
-// puts its substance in the first screenful; the rest is boilerplate, footers
-// and marketing that only produce false positives ("apply for a credit card
-// today").
-func truncateForScan(body string) string {
-	const scanLimit = 1500
-	if len(body) <= scanLimit {
-		return body
-	}
-	return body[:scanLimit]
-}
-
 // AllowedSenderDomains is the set of sender domains known to carry finance
 // mail. Money ingest uses it to pick candidates out of the shared message
 // index; it is not a fetch filter, so a domain missing here only means the AI
-// classifier has to be the one to flag the message.
+// classifier, or a user-defined rule naming the sender, has to be the one to
+// surface the message.
 var AllowedSenderDomains = func() []string {
 	out := make([]string, 0, len(byDomain))
 	for domain := range byDomain {

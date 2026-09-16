@@ -6,70 +6,42 @@ import (
 	"strings"
 )
 
-// Attaching an alert to the right finance account.
+// Attaching mail to the right finance account.
 //
 // The rule that matters: an account is identified by its *last four digits
 // together with the institution that sent the mail*. Last-4 alone collides —
 // four digits across a dozen accounts is a coin flip, and a mis-attached
 // transaction silently corrupts two balances at once.
+//
+// Matching only ever finds accounts the user created. Ingest used to create
+// accounts from an alert's own evidence, and every mis-read alert became a
+// phantom account nobody asked for; now mail that names an unknown account is
+// held until the user adds it (ingest's pending_account outcome).
 
-// AccountHint is what an alert email told us about the account it concerns.
+// AccountHint is what a message said about the account it concerns.
 type AccountHint struct {
 	// Issuer is the short institution code ("HDFC"), Name its display form
-	// ("HDFC Bank"). Issuer is what gets stored in finance_accounts.bank.
+	// ("HDFC Bank"). Issuer is what finance_accounts.bank is matched against.
 	Issuer string
 	Name   string
 	Last4  string
-	// Kind is the finance_accounts.account_type this alert implies: bank,
+	// Kind is the finance_accounts.account_type the rule implies: bank,
 	// credit_card, wallet, investment or loan.
 	Kind     string
 	Currency string
 }
 
-// placeholderKind is the type an email-created account gets when the alert
-// didn't say what kind of account it was.
-const placeholderKind = "bank"
-
-// MatchAccount finds the finance account an alert belongs to WITHOUT creating
-// one, returning 0 when nothing registered matches.
+// MatchAccount finds the active finance account a message belongs to, or 0
+// when nothing registered matches. It never creates one.
 func MatchAccount(db *sql.DB, hint AccountHint) int64 {
 	return matchExisting(db, normalizeHint(hint))
-}
-
-// ResolveAccount finds the finance account an alert belongs to, auto-creating
-// one from the alert's own evidence (issuer, last four, and the kind
-// KindForAlert read off the message) when nothing registered matches yet.
-//
-// This is what email ingest uses so that a bank, card, or broker mail turns
-// into a tracked account and a transaction in one pass, with nothing for the
-// user to approve first. The kind guess can be wrong — a card-shaped alert
-// sharing digits with a savings account, say — which is exactly why an
-// account's type is never rewritten once it exists (below): the guess stands
-// until the user corrects it by hand, and only that manual correction sticks.
-func ResolveAccount(db *sql.DB, hint AccountHint) int64 {
-	h := normalizeHint(hint)
-	if id := matchExisting(db, h); id != 0 {
-		return id
-	}
-	return createAccount(db, h, "email")
-}
-
-// CreateApprovedAccount records an account a person has agreed to, and is the
-// only way an account is created from mail evidence.
-//
-// source is 'manual' because a human chose this account's type in the approval
-// dialog. Recording it as 'email' used to be how a savings account got
-// relabelled a credit card: the type was then treated as a guess that a later
-// card-shaped alert could overwrite.
-func CreateApprovedAccount(db *sql.DB, hint AccountHint) int64 {
-	return createAccount(db, normalizeHint(hint), "manual")
 }
 
 func normalizeHint(hint AccountHint) AccountHint {
 	hint.Issuer = strings.TrimSpace(hint.Issuer)
 	hint.Last4 = strings.TrimSpace(hint.Last4)
 	if hint.Kind == "" {
-		hint.Kind = placeholderKind
+		hint.Kind = "bank"
 	}
 	if hint.Currency == "" {
 		hint.Currency = "INR"
@@ -83,21 +55,24 @@ func normalizeHint(hint AccountHint) AccountHint {
 // bankMatches accepts the several spellings the same institution legitimately
 // has on an account row.
 //
-// Accounts are hand-entered now, so finance_accounts.bank holds whatever the
-// user chose: the issuer code the parsers use ("HDFC"), the display name they
-// picked from the list ("HDFC Bank"), or nothing at all if they skipped the
-// field. Insisting on the issuer code alone would silently strand an account's
-// mail forever — it would parse, find no match, and wait for an account that
+// Accounts are hand-entered, so finance_accounts.bank holds whatever the user
+// chose: the issuer code the rules use ("HDFC"), the display name they picked
+// from the list ("HDFC Bank"), or nothing at all if they skipped the field.
+// Insisting on the issuer code alone would silently strand an account's mail
+// forever — it would parse, find no match, and wait for an account that
 // already exists.
 const bankMatches = `(LOWER(bank) = LOWER(?) OR LOWER(bank) = LOWER(?) OR bank = '')`
 
 // matchExisting tries progressively weaker identifications, strongest first.
+// Archived accounts are never matched: an account the user retired must not
+// keep collecting mail.
 func matchExisting(db *sql.DB, hint AccountHint) int64 {
 	if hint.Last4 != "" {
 		// Same digits, same bank, same kind — the only unambiguous match.
 		if id := queryID(db, `
 			SELECT id FROM finance_accounts
 			WHERE account_number LIKE '%' || ? AND `+bankMatches+` AND account_type = ?
+			  AND archived_at = ''
 			ORDER BY id LIMIT 1`, hint.Last4, hint.Issuer, hint.Name, hint.Kind); id != 0 {
 			return id
 		}
@@ -107,6 +82,7 @@ func matchExisting(db *sql.DB, hint AccountHint) int64 {
 		if id := queryID(db, `
 			SELECT id FROM finance_accounts
 			WHERE account_number LIKE '%' || ? AND `+bankMatches+`
+			  AND archived_at = ''
 			ORDER BY id LIMIT 1`, hint.Last4, hint.Issuer, hint.Name); id != 0 {
 			return id
 		}
@@ -122,11 +98,11 @@ func matchExisting(db *sql.DB, hint AccountHint) int64 {
 	return queryID(db, `
 		SELECT id FROM finance_accounts
 		WHERE (LOWER(bank) = LOWER(?) OR LOWER(bank) = LOWER(?))
-		  AND account_type = ? AND account_number = ''
+		  AND account_type = ? AND account_number = '' AND archived_at = ''
 		ORDER BY id LIMIT 1`, hint.Issuer, hint.Name, hint.Kind)
 }
 
-// Account types are never rewritten from mail any more.
+// Account types are never rewritten from mail.
 //
 // There used to be a reconcileKind step that "upgraded" an account still
 // carrying the placeholder type when a clearer alert arrived. It could not
@@ -134,45 +110,20 @@ func matchExisting(db *sql.DB, hint AccountHint) int64 {
 // tell "we don't know yet" from "this is a savings account". One card-shaped
 // alert naming the same digits was enough to relabel a salary account as a
 // credit card — and a credit card's balance reads as debt, so net worth moved
-// by the account's whole balance. The type a person chose now stands until
-// they change it.
+// by the account's whole balance. The type a person chose stands until they
+// change it.
 
-func createAccount(db *sql.DB, hint AccountHint, source string) int64 {
-	res, err := db.Exec(`
-		INSERT INTO finance_accounts
-			(name, bank, account_type, account_number, currency, source)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		accountDisplayName(hint), hint.Issuer, hint.Kind, maskedNumber(hint.Last4),
-		hint.Currency, source)
-	if err != nil {
-		return 0
+// AccountDisplayName names an account the way a bank statement would —
+// "HDFC Bank •• 4125" — so an account offered from mail is recognizable in a
+// list before the user has renamed it.
+func AccountDisplayName(name, last4 string) string {
+	if name == "" {
+		name = "Unknown"
 	}
-	id, _ := res.LastInsertId()
-	return id
-}
-
-// accountDisplayName names a discovered account the way a bank statement would
-// — "HDFC Bank •• 4125" — so it is recognizable in a list before the user has
-// renamed it.
-func accountDisplayName(hint AccountHint) string {
-	label := hint.Name
-	if label == "" {
-		label = "Unknown"
-	}
-	if hint.Last4 == "" {
-		return label
-	}
-	return label + " •• " + hint.Last4
-}
-
-// maskedNumber stores a discovered account's digits in the same masked shape
-// statements use, so MatchAccountByLast4's suffix match works against accounts
-// from either source.
-func maskedNumber(last4 string) string {
 	if last4 == "" {
-		return ""
+		return name
 	}
-	return "XXXXXXXX" + last4
+	return name + " •• " + last4
 }
 
 func queryID(db *sql.DB, query string, args ...any) int64 {
@@ -183,7 +134,8 @@ func queryID(db *sql.DB, query string, args ...any) int64 {
 	return id
 }
 
-// RecordBalanceSnapshot stores a bank-reported balance for an account.
+// RecordBalanceSnapshot stores a bank-reported (or user-stated) balance for an
+// account.
 //
 // Snapshots are the strongest balance evidence there is, so RecomputeBalance
 // anchors on the most recent one and derives everything after it from

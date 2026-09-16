@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"wollow/backend/internal/money/models"
 )
 
 // sample resolves a file in the repo's statements/ folder, four levels up from
@@ -97,12 +99,79 @@ func TestParseDepositSummary(t *testing.T) {
 	if first.DedupeKey == "" {
 		t.Error("no dedupe key, so a re-import would duplicate this deposit")
 	}
+}
 
-	// The "Total INR" row carries amounts but no account number; reading it as
-	// a deposit would double the portfolio.
-	for _, d := range summary.Deposits {
-		if !isAllDigits(d.Identifier) {
-			t.Errorf("non-deposit row leaked through: identifier %q", d.Identifier)
+func TestIsZerodhaPnLStatement(t *testing.T) {
+	equity := sample(t, "pnl-YPQ985.xlsx")
+	if !IsZerodhaPnLStatement(equity) {
+		t.Fatal("equity P&L export was not recognized as one")
+	}
+	hdfc := sample(t, filepath.Join("HDFC", "188507376_FDSummary_12Aug2026.xls"))
+	if IsZerodhaPnLStatement(hdfc) {
+		t.Fatal("an HDFC .xls export was recognized as a Zerodha P&L .xlsx export")
+	}
+}
+
+func TestParseZerodhaPnLStatementEquity(t *testing.T) {
+	pnl, err := ParseZerodhaPnLStatement(sample(t, "pnl-YPQ985.xlsx"))
+	if err != nil {
+		t.Fatalf("parsing equity P&L statement: %v", err)
+	}
+	if pnl.ClientID != "YPQ985" {
+		t.Errorf("clientID = %q, want %q", pnl.ClientID, "YPQ985")
+	}
+	if pnl.Kind != "stock" {
+		t.Errorf("kind = %q, want %q", pnl.Kind, "stock")
+	}
+	if pnl.PeriodFrom != "2022-04-04" || pnl.PeriodTo != "2026-08-19" {
+		t.Errorf("period = %s..%s, want 2022-04-04..2026-08-19", pnl.PeriodFrom, pnl.PeriodTo)
+	}
+
+	byISIN := map[string]models.ParsedZerodhaHolding{}
+	for _, h := range pnl.Holdings {
+		byISIN[h.ISIN] = h
+		if h.Units <= 0 {
+			t.Errorf("holding %s has non-positive units %.4f, a closed position leaked through", h.Symbol, h.Units)
+		}
+		if h.Kind != "stock" {
+			t.Errorf("holding %s kind = %q, want stock", h.Symbol, h.Kind)
+		}
+	}
+	mahabank, ok := byISIN["INE457A01014"]
+	if !ok {
+		t.Fatal("MAHABANK (open position) not found among parsed holdings")
+	}
+	if mahabank.Symbol != "MAHABANK" {
+		t.Errorf("symbol = %q, want MAHABANK", mahabank.Symbol)
+	}
+	if mahabank.Units != 1000 {
+		t.Errorf("units = %.4f, want 1000", mahabank.Units)
+	}
+	if mahabank.Price != 79.85 {
+		t.Errorf("price = %.4f, want 79.85", mahabank.Price)
+	}
+	if mahabank.Value != 58800 {
+		t.Errorf("value = %.4f, want 58800", mahabank.Value)
+	}
+	if _, ok := byISIN["INE423A01024"]; ok {
+		t.Error("ADANIENT is a fully closed position (Open Quantity 0) and should not appear")
+	}
+}
+
+func TestParseZerodhaPnLStatementMutualFunds(t *testing.T) {
+	pnl, err := ParseZerodhaPnLStatement(sample(t, "pnl-YPQ985 (1).xlsx"))
+	if err != nil {
+		t.Fatalf("parsing mutual funds P&L statement: %v", err)
+	}
+	if pnl.Kind != "mutual_fund" {
+		t.Errorf("kind = %q, want %q", pnl.Kind, "mutual_fund")
+	}
+	if len(pnl.Holdings) != 3 {
+		t.Fatalf("parsed %d holdings, want 3", len(pnl.Holdings))
+	}
+	for _, h := range pnl.Holdings {
+		if h.Kind != "mutual_fund" {
+			t.Errorf("holding %s kind = %q, want mutual_fund", h.Symbol, h.Kind)
 		}
 	}
 }

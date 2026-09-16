@@ -8,14 +8,8 @@ import (
 	"strings"
 )
 
-// Bringing foreign holdings into a rupee net worth.
-//
-// A US stock is priced in dollars. Adding that number to a rupee total
-// overstates it by the exchange rate, and leaving it out understates net
-// worth — neither is acceptable once the user asks for those holdings to
-// count. So a rate is required, and it has to come from somewhere defensible:
-// either the user typed it, or it was read off their own bank's forex
-// remittances. Nothing here invents one.
+// Bringing foreign holdings into a rupee net worth. A rate comes from the user
+// (always wins), the live market, or the user's own bank remittances — never a guess.
 
 // Rate is an exchange rate and where it came from.
 type Rate struct {
@@ -136,4 +130,51 @@ func EnsureRate(db *sql.DB, currency string) float64 {
 		return rate
 	}
 	return rate
+}
+
+// SetMarketRate stores a live rate, reporting false when a rate the user set by hand kept it out.
+func SetMarketRate(db Queryer, currency string, inrPerUnit float64, asOf string) (bool, error) {
+	currency = strings.ToUpper(strings.TrimSpace(currency))
+	var source string
+	if err := db.QueryRow(`SELECT source FROM fx_rates WHERE currency = ?`, currency).Scan(&source); err == nil && source == "manual" {
+		return false, nil
+	}
+	if err := SetRate(db, currency, inrPerUnit, asOf, "market", "live market rate"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// TradeNeedingRate is a foreign-currency trade whose trade-date exchange rate is not known yet.
+type TradeNeedingRate struct {
+	ID           int64
+	InvestmentID int64
+	Currency     string
+	TradeDate    string
+}
+
+// TradesNeedingRate lists those trades, grouped by currency and oldest first.
+func TradesNeedingRate(db *sql.DB) ([]TradeNeedingRate, error) {
+	rows, err := db.Query(`
+		SELECT id, investment_id, UPPER(currency), trade_date FROM investment_trades
+		WHERE fx_rate IS NULL AND trade_date != '' AND currency != '' AND UPPER(currency) != 'INR'
+		ORDER BY UPPER(currency), trade_date, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TradeNeedingRate
+	for rows.Next() {
+		var t TradeNeedingRate
+		if err := rows.Scan(&t.ID, &t.InvestmentID, &t.Currency, &t.TradeDate); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func SetTradeRate(db Execer, tradeID int64, rate float64) error {
+	_, err := db.Exec(`UPDATE investment_trades SET fx_rate = ? WHERE id = ?`, rate, tradeID)
+	return err
 }

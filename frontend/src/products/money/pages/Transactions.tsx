@@ -18,8 +18,9 @@ import {
 import { api } from '../api'
 import { formatINR, formatDate } from '../lib/format'
 import { EditTransactionModal } from '../components/EditTransactionModal'
+import { BillPaymentPrompt } from '../components/BillPaymentPrompt'
 import { TRANSFER_KIND_LABELS } from '../types'
-import type { ClassifyStatus, Transaction } from '../types'
+import type { BillPaymentSuggestion, ClassifyStatus, Transaction } from '../types'
 
 /** Live progress of a running classification pass. */
 function ClassifyProgress({ status }: { status?: ClassifyStatus }) {
@@ -62,6 +63,7 @@ export function Transactions() {
   const [showTransferMenu, setShowTransferMenu] = useState(false)
   const [classifyError, setClassifyError] = useState<string | null>(null)
   const [spreadNote, setSpreadNote] = useState<string | null>(null)
+  const [billPrompt, setBillPrompt] = useState<BillPaymentSuggestion | null>(null)
 
   // Only the free-text box is debounced; the dropdowns fire immediately.
   useEffect(() => {
@@ -139,7 +141,10 @@ export function Transactions() {
   })
   const linkTransferMutation = useMutation({
     mutationFn: ({ a, b }: { a: number; b: number }) => api.transactions.linkTransfer(a, b),
-    onSuccess: afterBulk,
+    onSuccess: (res) => {
+      afterBulk()
+      if (res.billSuggestion?.bills.length) setBillPrompt(res.billSuggestion)
+    },
   })
   const markTransferMutation = useMutation({
     mutationFn: ({ ids, kind, counterparty }: { ids: number[]; kind: string; counterparty: string }) =>
@@ -615,6 +620,8 @@ export function Transactions() {
           </table>
         </div>
       </div>
+
+      {billPrompt && <BillPaymentPrompt suggestion={billPrompt} onClose={() => setBillPrompt(null)} />}
 
       {editing && (
         <EditTransactionModal

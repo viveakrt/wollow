@@ -160,26 +160,6 @@ func deltaAfter(db Queryer, accountID int64, anchor balanceAnchor) float64 {
 	return delta
 }
 
-// MatchAccountByLast4 finds an existing finance account whose stored
-// account_number ends with the given last-4 digits. Returns 0 if there is no
-// match, or if last4 is empty.
-//
-// Prefer ResolveAccount for anything coming out of an email: this ignores the
-// institution, so four digits shared by two accounts resolve to whichever was
-// created first.
-func MatchAccountByLast4(db *sql.DB, last4 string) int64 {
-	if last4 == "" {
-		return 0
-	}
-	var id int64
-	if err := db.QueryRow(
-		`SELECT id FROM finance_accounts WHERE account_number LIKE '%' || ? ORDER BY id LIMIT 1`, last4,
-	).Scan(&id); err != nil {
-		return 0
-	}
-	return id
-}
-
 // EmailDedupeHash is the uniqueness key for a transaction extracted from an
 // alert email. It must stay stable: it is stored in transactions.dedupe_hash
 // and backed by a unique index, so changing the formula would let previously

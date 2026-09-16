@@ -168,7 +168,7 @@ func (s *Server) handleConfirmTransferSuggestion(w http.ResponseWriter, r *http.
 	}
 
 	s.DB.Exec(`UPDATE transfer_suggestions SET status='confirmed' WHERE id=?`, id)
-	httpx.WriteJSON(w, 200, map[string]bool{"confirmed": true})
+	httpx.WriteJSON(w, 200, confirmTransferResponse{Confirmed: true, BillSuggestion: s.suggestBillPayment(txnA, txnB)})
 }
 
 func (s *Server) handleDismissTransferSuggestion(w http.ResponseWriter, r *http.Request) {
@@ -189,6 +189,16 @@ type linkTransferRequest struct {
 	TxnIDB int64 `json:"txnIdB"`
 }
 
+type linkTransferResponse struct {
+	Linked         bool                   `json:"linked"`
+	BillSuggestion *billPaymentSuggestion `json:"billSuggestion,omitempty"`
+}
+
+type confirmTransferResponse struct {
+	Confirmed      bool                   `json:"confirmed"`
+	BillSuggestion *billPaymentSuggestion `json:"billSuggestion,omitempty"`
+}
+
 // handleLinkTransfer is the manual counterpart to confirming a suggestion —
 // the user picks any two transactions directly instead of waiting for the
 // auto-scan to propose them.
@@ -206,7 +216,7 @@ func (s *Server) handleLinkTransfer(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, 500, err.Error())
 		return
 	}
-	httpx.WriteJSON(w, 200, map[string]bool{"linked": true})
+	httpx.WriteJSON(w, 200, linkTransferResponse{Linked: true, BillSuggestion: s.suggestBillPayment(req.TxnIDA, req.TxnIDB)})
 }
 
 // handleUnlinkTransfer reverts both legs of a transfer back to independent

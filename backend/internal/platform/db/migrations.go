@@ -78,9 +78,22 @@ var columnMigrations = []columnMigration{
 	{"finance_accounts", "credit_limit", "REAL NOT NULL DEFAULT 0"},
 	{"finance_accounts", "source", "TEXT NOT NULL DEFAULT 'manual'"},
 	{"finance_accounts", "include_in_networth", "INTEGER NOT NULL DEFAULT 1"},
+	{"finance_accounts", "archived_at", "TEXT NOT NULL DEFAULT ''"},
 	{"investments", "last_price", "REAL"},
 	{"investments", "last_price_at", "TEXT NOT NULL DEFAULT ''"},
+	{"investments", "quote_symbol", "TEXT NOT NULL DEFAULT ''"},
+	{"investments", "quote_error", "TEXT NOT NULL DEFAULT ''"},
+	{"investments", "price_source", "TEXT NOT NULL DEFAULT ''"},
+	{"investments", "realized_gain", "REAL NOT NULL DEFAULT 0"},
+	{"investments", "realized_gain_inr", "REAL"},
+	{"investments", "invested_inr", "REAL"},
+	{"investment_trades", "fx_rate", "REAL"},
 	{"bills", "paid_at", "TEXT NOT NULL DEFAULT ''"},
+	{"message_links", "rule_id", "INTEGER REFERENCES email_parser_rules(id) ON DELETE SET NULL"},
+	{"message_links", "pending_issuer", "TEXT NOT NULL DEFAULT ''"},
+	{"message_links", "pending_name", "TEXT NOT NULL DEFAULT ''"},
+	{"message_links", "pending_last4", "TEXT NOT NULL DEFAULT ''"},
+	{"message_links", "pending_kind", "TEXT NOT NULL DEFAULT ''"},
 }
 
 func runMigrations(conn *sql.DB) error {

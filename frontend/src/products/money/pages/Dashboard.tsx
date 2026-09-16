@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import {
   PieChart,
@@ -24,6 +24,8 @@ import {
   Users,
   EyeOff,
   ArrowLeftRight,
+  Check,
+  Loader2,
 } from 'lucide-react'
 import { api } from '../api'
 import { formatINR, formatMoney } from '../lib/format'
@@ -287,6 +289,7 @@ export function Dashboard() {
                             Min {formatINR(b.minimumDue)}
                           </div>
                         )}
+                        <MarkPaidButton billId={b.id} />
                       </div>
                     </div>
                   ))}
@@ -473,6 +476,26 @@ function CashFlowSummary({ cashFlow }: { cashFlow: DashboardSummary['cashFlow'] 
   )
 }
 
+/** Marks an upcoming bill paid today; it then drops off the list. */
+function MarkPaidButton({ billId }: { billId: number }) {
+  const queryClient = useQueryClient()
+  const mutation = useMutation({
+    mutationFn: () => api.bills.markPaid(billId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['money'] }),
+  })
+  return (
+    <button
+      type="button"
+      onClick={() => mutation.mutate()}
+      disabled={mutation.isPending}
+      className="mt-1 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-[var(--color-accent-2)] hover:bg-[var(--color-accent-tint)] disabled:opacity-50"
+    >
+      {mutation.isPending ? <Loader2 size={11} className="animate-spin" /> : <Check size={11} />}
+      Mark paid
+    </button>
+  )
+}
+
 /**
  * Accounts grouped the way the money reads: what's spendable, what's owed,
  * what's invested — mirroring the reference design's grouped overview.
@@ -521,29 +544,52 @@ function AccountsOverview({
               </span>
             </div>
             <div className="space-y-2">
-              {members.map((a) => (
-                <div key={a.id} className="flex items-center justify-between text-sm">
-                  <div className="min-w-0 flex items-center gap-1.5">
-                    <span className="truncate">{a.name}</span>
-                    {!a.includeInNetworth && (
-                      <span title="Not counted in net worth">
-                        <EyeOff size={11} className="shrink-0 text-[var(--color-text-muted)]" />
+              {members.map((a) => {
+                // A card reads as what it owes against its limit, not as a
+                // signed balance the reader has to interpret.
+                const liability = LIABILITY_TYPES.has(a.accountType)
+                const outstanding = liability ? Math.max(0, -a.currentBalance) : 0
+                const utilisation = liability && a.creditLimit > 0 ? Math.min(1, outstanding / a.creditLimit) : null
+                return (
+                  <div key={a.id} className="text-sm">
+                    <div className="flex items-center justify-between">
+                      <div className="min-w-0 flex items-center gap-1.5">
+                        <span className="truncate">{a.name}</span>
+                        {!a.includeInNetworth && (
+                          <span title="Not counted in net worth">
+                            <EyeOff size={11} className="shrink-0 text-[var(--color-text-muted)]" />
+                          </span>
+                        )}
+                      </div>
+                      <span
+                        className={`shrink-0 ml-3 font-medium ${
+                          (liability ? outstanding > 0 : a.currentBalance < 0)
+                            ? 'text-[var(--color-negative)]'
+                            : !a.includeInNetworth
+                              ? 'text-[var(--color-text-muted)]'
+                              : ''
+                        }`}
+                      >
+                        {liability ? formatINR(outstanding) : formatINR(a.currentBalance)}
+                        {liability && a.creditLimit > 0 && (
+                          <span className="text-xs font-normal text-[var(--color-text-muted)]">
+                            {' '}
+                            of {formatINR(a.creditLimit, true)}
+                          </span>
+                        )}
                       </span>
+                    </div>
+                    {utilisation != null && (
+                      <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-[var(--color-hover)]">
+                        <div
+                          className={`h-full rounded-full ${utilisation > 0.8 ? 'bg-[var(--color-negative)]' : 'bg-[var(--color-accent)]'}`}
+                          style={{ width: `${Math.round(utilisation * 100)}%` }}
+                        />
+                      </div>
                     )}
                   </div>
-                  <span
-                    className={`shrink-0 ml-3 font-medium ${
-                      a.currentBalance < 0
-                        ? 'text-[var(--color-negative)]'
-                        : !a.includeInNetworth
-                          ? 'text-[var(--color-text-muted)]'
-                          : ''
-                    }`}
-                  >
-                    {formatINR(a.currentBalance)}
-                  </span>
-                </div>
-              ))}
+                )
+              })}
             </div>
           </div>
         )

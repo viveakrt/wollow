@@ -12,6 +12,7 @@ import type {
   InvestmentTrade,
   TradeInput,
   ParsedDeposit,
+  ParsedZerodhaHolding,
   EmailAccount,
   Bill,
   FXRate,
@@ -19,6 +20,16 @@ import type {
   RescanResult,
   TransferSuggestion,
   PDFPassword,
+  ParserRule,
+  ParserRuleInput,
+  ParserRuleKind,
+  ParserFieldSpec,
+  ParserSample,
+  ParserTestResponse,
+  PendingAccountGroup,
+  BillPaymentSuggestion,
+  MarketSearchHit,
+  PriceRefreshResult,
 } from './types'
 
 // Money's routes moved under /api/money in the merge, and the trailing slashes
@@ -46,12 +57,47 @@ async function upload<T>(path: string, file: File): Promise<T> {
 
 export const api = {
   accounts: {
+    /** Active accounts only. */
     list: () => http.get<Account[]>(`${BASE}/accounts`),
+    /** Active and archived accounts. */
+    listAll: () => http.get<Account[]>(`${BASE}/accounts`, { includeArchived: 1 }),
     get: (id: number) => http.get<Account>(`${BASE}/accounts/${id}`),
     create: (data: Partial<Account>) => http.post<Account>(`${BASE}/accounts`, data),
     update: (id: number, data: Partial<Account>) => http.put<Account>(`${BASE}/accounts/${id}`, data),
     delete: (id: number) => http.delete<void>(`${BASE}/accounts/${id}`),
     bulkDelete: (ids: number[]) => http.post<{ deleted: number }>(`${BASE}/accounts/bulk-delete`, { ids }),
+    // Archiving retires an account without losing its history, unlike delete.
+    archive: (id: number) => http.post<Account>(`${BASE}/accounts/${id}/archive`),
+    unarchive: (id: number) => http.post<Account>(`${BASE}/accounts/${id}/unarchive`),
+    // States the balance as the user sees it (a card's outstanding is a
+    // positive figure); the server applies the ledger's sign convention and
+    // records it as a manual snapshot the running balance anchors on.
+    setBalance: (id: number, amount: number, asOf?: string) =>
+      http.post<Account>(`${BASE}/accounts/${id}/set-balance`, { amount, asOf }),
+    // Mail a rule read but whose account nobody has registered, grouped by
+    // the account it names.
+    pending: () => http.get<PendingAccountGroup[]>(`${BASE}/accounts/pending`),
+  },
+  // Parsers the user defines from a sample email. Fields are derived on the
+  // server from the marked spans, so the same code that derives them applies
+  // them at ingest.
+  parserRules: {
+    list: () => http.get<ParserRule[]>(`${BASE}/parser-rules`),
+    get: (id: number) => http.get<ParserRule>(`${BASE}/parser-rules/${id}`),
+    create: (input: ParserRuleInput) => http.post<ParserRule>(`${BASE}/parser-rules`, input),
+    update: (id: number, input: ParserRuleInput | ParserRule) =>
+      http.put<ParserRule>(`${BASE}/parser-rules/${id}`, input),
+    delete: (id: number) => http.delete<void>(`${BASE}/parser-rules/${id}`),
+    fields: () => http.get<Record<ParserRuleKind, ParserFieldSpec[]>>(`${BASE}/parser-rules/fields`),
+    // The message's text exactly as ingest will see it — not the Mail API's
+    // rendering — so what is marked is what gets matched.
+    sample: (mailAccountId: number, uid: number, folder = 'INBOX') =>
+      http.get<ParserSample>(`${BASE}/parser-rules/sample`, { mailAccountId, uid, folder }),
+    test: (rule: ParserRuleInput, mailAccountId: number, limit = 20) =>
+      http.post<ParserTestResponse>(`${BASE}/parser-rules/test`, { rule, mailAccountId, limit }),
+    // Applies a rule to the mail from its sender that arrived before the rule
+    // existed, across every mailbox.
+    rescan: (id: number) => http.post<RescanResult>(`${BASE}/parser-rules/${id}/rescan`),
   },
   // The senders Money can attribute mail to. The add-account form offers these
   // so a hand-entered account stores the issuer code alerts match against.
@@ -77,9 +123,15 @@ export const api = {
       http.put<Investment>(`${BASE}/investments/${id}/trades/${tradeId}`, data),
     deleteTrade: (id: number, tradeId: number) =>
       http.delete<Investment>(`${BASE}/investments/${id}/trades/${tradeId}`),
-    // Money has no market feed, so a holding is valued by entering its price.
+    // A typed price; the next market refresh replaces it for a holding with a symbol.
     setPrice: (id: number, price: number, asOf?: string) =>
       http.post<Investment>(`${BASE}/investments/${id}/price`, { price, asOf }),
+    // Live prices and exchange rates now, for every holding or just one.
+    refreshPrices: (id?: number) =>
+      http.post<PriceRefreshResult>(`${BASE}/investments/refresh-prices`, undefined, id ? { id } : undefined),
+  },
+  market: {
+    search: (q: string) => http.get<MarketSearchHit[]>(`${BASE}/market/search`, { q }),
   },
   categories: {
     list: () => http.get<Category[]>(`${BASE}/categories`),
@@ -123,8 +175,12 @@ export const api = {
       http.post<{ applied: boolean }>(`${BASE}/transactions/${id}/apply-classification`),
     dismissClassification: (id: number) =>
       http.post<{ dismissed: boolean }>(`${BASE}/transactions/${id}/dismiss-classification`),
+    // billSuggestion is set when the money landed on a card that has unpaid bills.
     linkTransfer: (txnIdA: number, txnIdB: number) =>
-      http.post<{ linked: boolean }>(`${BASE}/transactions/link-transfer`, { txnIdA, txnIdB }),
+      http.post<{ linked: boolean; billSuggestion?: BillPaymentSuggestion }>(
+        `${BASE}/transactions/link-transfer`,
+        { txnIdA, txnIdB },
+      ),
     unlinkTransfer: (id: number) =>
       http.post<{ unlinked: boolean }>(`${BASE}/transactions/${id}/unlink-transfer`),
   },
@@ -132,7 +188,9 @@ export const api = {
     list: () => http.get<TransferSuggestion[]>(`${BASE}/transfer-suggestions`),
     scan: () => http.post<{ suggestionsCreated: number }>(`${BASE}/transfer-suggestions/scan`),
     confirm: (id: number) =>
-      http.post<{ confirmed: boolean }>(`${BASE}/transfer-suggestions/${id}/confirm`),
+      http.post<{ confirmed: boolean; billSuggestion?: BillPaymentSuggestion }>(
+        `${BASE}/transfer-suggestions/${id}/confirm`,
+      ),
     dismiss: (id: number) =>
       http.post<{ dismissed: boolean }>(`${BASE}/transfer-suggestions/${id}/dismiss`),
   },
@@ -153,6 +211,12 @@ export const api = {
       http.post<{ imported: number; updated: number }>(`${BASE}/import/deposits/commit`, {
         fileName,
         deposits,
+      }),
+    zerodhaCommit: (fileName: string, asOf: string, holdings: ParsedZerodhaHolding[]) =>
+      http.post<{ imported: number; updated: number }>(`${BASE}/import/zerodha/commit`, {
+        fileName,
+        asOf,
+        holdings,
       }),
   },
   // Mailboxes are connected and removed on the Mail side — one credential
@@ -175,6 +239,10 @@ export const api = {
   },
   bills: {
     list: () => http.get<Bill[]>(`${BASE}/bills`),
+    // Paid today unless a date is given; this settles the reminder, not the card balance.
+    markPaid: (id: number, paidAt?: string) =>
+      http.post<Bill>(`${BASE}/bills/${id}/paid`, paidAt ? { paidAt } : {}),
+    markUnpaid: (id: number) => http.post<Bill>(`${BASE}/bills/${id}/unpaid`),
   },
   pdfPasswords: {
     list: () => http.get<PDFPassword[]>(`${BASE}/pdf-passwords`),

@@ -13,18 +13,21 @@ import type { Account } from '../types'
  */
 export function AccountFormModal({
   account,
+  initial,
   onClose,
   onSaved,
 }: {
   /** null creates a new account; an existing account edits it. */
   account: Account | null
+  /** Prefill for a new account — what a held email said about it. */
+  initial?: Partial<Account>
   onClose: () => void
   onSaved: () => void
 }) {
-  const [name, setName] = useState(account?.name ?? '')
-  const [accountType, setAccountType] = useState(account?.accountType ?? 'bank')
-  const [bank, setBank] = useState(account?.bank ?? '')
-  const [accountNumber, setAccountNumber] = useState(account?.accountNumber ?? '')
+  const [name, setName] = useState(account?.name ?? initial?.name ?? '')
+  const [accountType, setAccountType] = useState(account?.accountType ?? initial?.accountType ?? 'bank')
+  const [bank, setBank] = useState(account?.bank ?? initial?.bank ?? '')
+  const [accountNumber, setAccountNumber] = useState(account?.accountNumber ?? initial?.accountNumber ?? '')
   const [openingBalance, setOpeningBalance] = useState(
     account ? String(account.openingBalance) : '0',
   )

@@ -3,6 +3,7 @@ package ledger
 import (
 	"database/sql"
 	"fmt"
+	"math"
 	"strings"
 
 	"wollow/backend/internal/money/models"
@@ -134,39 +135,90 @@ func RecordTrade(db *sql.DB, investmentID int64, trade *models.ParsedTrade, dedu
 	return added > 0, nil
 }
 
-// RecomputeHolding rebuilds a position from its trades.
-//
-// Units and cost are sums over buys minus sells. Current value uses the last
-// known price when there is one and falls back to cost otherwise — a holding
-// nobody has priced yet is worth what was paid for it as far as net worth is
-// concerned, which is honest, whereas zero would quietly delete it from the
-// portfolio.
-func RecomputeHolding(db Queryer, investmentID int64) error {
-	var buyShares, sellShares, buyAmount, sellAmount sql.NullFloat64
-	err := db.QueryRow(`
-		SELECT
-			COALESCE(SUM(CASE WHEN side = 'buy'  THEN shares END), 0),
-			COALESCE(SUM(CASE WHEN side = 'sell' THEN shares END), 0),
-			COALESCE(SUM(CASE WHEN side = 'buy'  THEN amount END), 0),
-			COALESCE(SUM(CASE WHEN side = 'sell' THEN amount END), 0)
-		FROM investment_trades WHERE investment_id = ?`, investmentID).
-		Scan(&buyShares, &sellShares, &buyAmount, &sellAmount)
-	if err != nil {
-		return fmt.Errorf("summing trades: %w", err)
-	}
+// rowsQueryer is what replaying trades needs; *sql.DB and *sql.Tx both satisfy it.
+type rowsQueryer interface {
+	Queryer
+	Query(query string, args ...interface{}) (*sql.Rows, error)
+}
 
-	units := buyShares.Float64 - sellShares.Float64
-	// Cost of what is still held. Selling returns a proportional slice of the
-	// cost basis rather than the sale proceeds, so a profitable sale does not
-	// leave the remaining shares looking free.
-	invested := buyAmount.Float64
-	if buyShares.Float64 > 0 && sellShares.Float64 > 0 {
-		avgCost := buyAmount.Float64 / buyShares.Float64
-		invested = buyAmount.Float64 - (avgCost * sellShares.Float64)
+// position is a holding rebuilt by replaying its trades in date order.
+type position struct {
+	units       float64
+	cost        float64 // cost of the units still held, in the holding's currency
+	costINR     float64 // that cost at each buy's own exchange rate
+	realized    float64 // profit locked in by sells, in the holding's currency
+	realizedINR float64
+	inrKnown    bool // false while a foreign trade has no trade-date rate
+	sold        bool
+}
+
+func replayTrades(db rowsQueryer, investmentID int64) (position, error) {
+	rows, err := db.Query(`
+		SELECT side, shares, amount, currency, fx_rate FROM investment_trades
+		WHERE investment_id = ? ORDER BY trade_date, id`, investmentID)
+	if err != nil {
+		return position{}, fmt.Errorf("reading trades: %w", err)
 	}
-	if invested < 0 {
-		invested = 0
+	defer rows.Close()
+
+	p := position{inrKnown: true}
+	for rows.Next() {
+		var side, currency string
+		var shares, amount float64
+		var fx sql.NullFloat64
+		if err := rows.Scan(&side, &shares, &amount, &currency, &fx); err != nil {
+			return p, err
+		}
+		rate := 1.0
+		if !isINR(currency) {
+			rate = fx.Float64
+			if !fx.Valid || rate <= 0 {
+				p.inrKnown = false
+			}
+		}
+		if side != "sell" {
+			p.units += shares
+			p.cost += amount
+			p.costINR += amount * rate
+			continue
+		}
+		p.sold = true
+		// Moving average cost: a sale carries the average cost at that moment, so later buys never change its profit.
+		if matched := math.Min(shares, p.units); matched > 0 {
+			avg, avgINR := p.cost/p.units, p.costINR/p.units
+			proceeds := amount * matched / shares
+			p.realized += proceeds - avg*matched
+			p.realizedINR += proceeds*rate - avgINR*matched
+			p.cost -= avg * matched
+			p.costINR -= avgINR * matched
+		}
+		p.units -= shares
 	}
+	return p, rows.Err()
+}
+
+func isINR(currency string) bool {
+	return currency == "" || strings.EqualFold(currency, "INR")
+}
+
+// roundTiny clears the float residue a full sale leaves behind.
+func roundTiny(v float64) float64 {
+	if math.Abs(v) < 1e-6 {
+		return 0
+	}
+	return v
+}
+
+// RecomputeHolding rebuilds a position from its trades. Current value uses the
+// last known price and falls back to cost: an unpriced holding is worth what
+// was paid for it, not zero.
+func RecomputeHolding(db rowsQueryer, investmentID int64) error {
+	p, err := replayTrades(db, investmentID)
+	if err != nil {
+		return err
+	}
+	units := roundTiny(p.units)
+	invested := math.Max(roundTiny(p.cost), 0)
 
 	var lastPrice sql.NullFloat64
 	db.QueryRow(`SELECT last_price FROM investments WHERE id = ?`, investmentID).Scan(&lastPrice)
@@ -176,15 +228,23 @@ func RecomputeHolding(db Queryer, investmentID int64) error {
 	}
 
 	status := "active"
-	if units <= 0 && sellShares.Float64 > 0 {
+	if units <= 0 && p.sold {
 		status = "closed"
+	}
+
+	var realizedINR, investedINR interface{}
+	if p.inrKnown {
+		realizedINR = roundTiny(p.realizedINR)
+		investedINR = math.Max(roundTiny(p.costINR), 0)
 	}
 
 	_, err = db.Exec(`
 		UPDATE investments
 		SET units = ?, invested_amount = ?, current_value = ?, status = ?,
+		    realized_gain = ?, realized_gain_inr = ?, invested_inr = ?,
 		    updated_at = datetime('now')
-		WHERE id = ?`, units, invested, currentValue, status, investmentID)
+		WHERE id = ?`, units, invested, currentValue, status,
+		roundTiny(p.realized), realizedINR, investedINR, investmentID)
 	if err != nil {
 		return fmt.Errorf("updating holding %d: %w", investmentID, err)
 	}
@@ -245,15 +305,27 @@ func RecordHoldingSnapshot(db *sql.DB, trade models.ParsedTrade, units, rate, va
 	if rate <= 0 || (lastPriceAt != "" && asOf < lastPriceAt) {
 		return investmentID, nil
 	}
-	return investmentID, SetHoldingPrice(db, investmentID, rate, asOf)
+	return investmentID, SetHoldingPrice(db, investmentID, rate, asOf, "statement")
 }
 
-// SetHoldingPrice records a per-unit price and re-values the position.
-func SetHoldingPrice(db Queryer, investmentID int64, price float64, asOf string) error {
+// SetHoldingPrice records a per-unit price (source: manual, market or statement) and re-values the position.
+func SetHoldingPrice(db rowsQueryer, investmentID int64, price float64, asOf, source string) error {
 	if _, err := db.Exec(`
-		UPDATE investments SET last_price = ?, last_price_at = ?, updated_at = datetime('now')
-		WHERE id = ?`, price, asOf, investmentID); err != nil {
+		UPDATE investments SET last_price = ?, last_price_at = ?, price_source = ?, updated_at = datetime('now')
+		WHERE id = ?`, price, asOf, source, investmentID); err != nil {
 		return fmt.Errorf("setting price: %w", err)
 	}
-	return RecomputeHolding(db, investmentID)
+	var trades int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM investment_trades WHERE investment_id = ?`, investmentID).Scan(&trades); err != nil {
+		return fmt.Errorf("counting trades: %w", err)
+	}
+	if trades > 0 {
+		return RecomputeHolding(db, investmentID)
+	}
+	// Without trades the cost is a figure the user entered, so only the value moves.
+	if _, err := db.Exec(`UPDATE investments SET current_value = ? * units WHERE id = ? AND units > 0`,
+		price, investmentID); err != nil {
+		return fmt.Errorf("revaluing holding %d: %w", investmentID, err)
+	}
+	return nil
 }

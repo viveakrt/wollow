@@ -14,16 +14,47 @@ import {
   Pencil,
   Check,
   X,
+  RefreshCw,
+  AlertTriangle,
+  Loader2,
+  PiggyBank,
 } from 'lucide-react'
 import { api } from '../api'
 import { formatINR, formatMoney, formatDate } from '../lib/format'
 import { Card } from '../components/Card'
 import { StatTile } from '../components/StatTile'
+import { SymbolPicker } from '../components/SymbolPicker'
 import { INVESTMENT_KIND_LABELS, INVESTMENT_TABS } from '../types'
-import type { Investment, InvestmentTrade, TradeInput } from '../types'
+import type { Investment, InvestmentTrade, PriceRefreshResult, TradeInput } from '../types'
 
 /** Kinds whose holdings are priced per unit rather than by maturity. */
 const SECURITY_KINDS = new Set(['us_stock', 'stock', 'mutual_fund'])
+
+function isForeign(inv: Investment): boolean {
+  return Boolean(inv.currency) && inv.currency.toUpperCase() !== 'INR'
+}
+
+function signedINR(value: number): string {
+  return `${value >= 0 ? '+' : '−'}${formatINR(Math.abs(value))}`
+}
+
+/** Market prices carry a timestamp; typed and statement prices only a date. */
+function formatPriceTime(value: string): string {
+  if (!value) return ''
+  if (!value.includes('T')) return formatDate(value)
+  const d = new Date(value)
+  return Number.isNaN(d.getTime())
+    ? value
+    : d.toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: 'numeric', minute: '2-digit' })
+}
+
+function priceTitle(inv: Investment): string {
+  if (inv.quoteError) return `${inv.quoteError} — click to fix`
+  if (!inv.priced) return 'No price yet — click to set one'
+  const when = formatPriceTime(inv.lastPriceAt)
+  if (inv.priceSource === 'market') return `Live price for ${inv.quoteSymbol}${when ? `, ${when}` : ''}`
+  return `Priced ${when || 'recently'} — click to update`
+}
 
 export function Investments() {
   const queryClient = useQueryClient()
@@ -54,6 +85,16 @@ export function Investments() {
     onSuccess: refresh,
   })
 
+  const [refreshResult, setRefreshResult] = useState<PriceRefreshResult | null>(null)
+  const refreshPrices = useMutation({
+    mutationFn: () => api.investments.refreshPrices(),
+    onSuccess: (res) => {
+      setRefreshResult(res)
+      refresh()
+      queryClient.invalidateQueries({ queryKey: ['money', 'fx-rates'] })
+    },
+  })
+
   const allInvestments = listQuery.data ?? []
   const summary = summaryQuery.data
 
@@ -78,8 +119,22 @@ export function Investments() {
           <p className="mt-1 text-sm text-[var(--color-text-muted)]">
             Deposits and holdings — imported from summary files, or entered by hand.
           </p>
+          <p className="mt-0.5 text-xs text-[var(--color-text-subtle)]">
+            {summary?.pricesUpdatedAt
+              ? `Live prices from Yahoo Finance and AMFI · last updated ${formatPriceTime(summary.pricesUpdatedAt)}`
+              : 'Live prices from Yahoo Finance and AMFI refresh every 30 minutes'}
+          </p>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => refreshPrices.mutate()}
+            disabled={refreshPrices.isPending}
+            className="flex items-center gap-2 rounded-lg border border-[var(--color-border-strong)] px-3 py-2 text-sm font-medium transition-colors hover:bg-[var(--color-hover)] disabled:opacity-50"
+          >
+            {refreshPrices.isPending ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />}
+            Refresh prices
+          </button>
           <Link
             to="/money/import"
             className="flex items-center gap-2 rounded-lg border border-[var(--color-border-strong)] px-3 py-2 text-sm font-medium transition-colors hover:bg-[var(--color-hover)]"
@@ -98,46 +153,90 @@ export function Investments() {
         </div>
       </div>
 
-      {summary && summary.count > 0 && (
-        <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-4">
-          <StatTile
-            icon={Wallet}
-            label="Portfolio value"
-            value={formatINR(summary.totalValue, true)}
-            iconColor="text-[var(--color-tint-violet)]"
-            iconBg="bg-[var(--color-tint-violet-bg)]"
-          />
-          <StatTile
-            icon={Coins}
-            label="Invested"
-            value={formatINR(summary.totalInvested, true)}
-            iconColor="text-[var(--color-tint-cyan)]"
-            iconBg="bg-[var(--color-tint-cyan-bg)]"
-          />
-          <StatTile
-            icon={TrendingUp}
-            label="Unrealised gain"
-            value={formatINR(summary.gain, true)}
-            iconColor="text-[var(--color-positive)]"
-            iconBg="bg-[var(--color-positive-tint)]"
-            sublabel={{
-              text: summary.gain >= 0 ? 'Above cost' : 'Below cost',
-              positive: summary.gain >= 0,
-            }}
-          />
-          <StatTile
-            icon={CalendarClock}
-            label="Maturing in 90 days"
-            value={String(summary.maturingSoon.length)}
-            iconColor="text-[var(--color-tint-orange)]"
-            iconBg="bg-[var(--color-tint-orange-bg)]"
-          />
+      {refreshResult && (
+        <div className="mb-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2.5 text-sm">
+          <div className="flex items-center justify-between gap-3">
+            <span>
+              Priced {refreshResult.priced} holding{refreshResult.priced !== 1 ? 's' : ''}
+              {refreshResult.ratesUpdated.length > 0 && ` · live ${refreshResult.ratesUpdated.join(', ')} rate`}
+              {refreshResult.tradeRates > 0 &&
+                ` · trade-date rates found for ${refreshResult.tradeRates} order${refreshResult.tradeRates !== 1 ? 's' : ''}`}
+              {refreshResult.failed > 0 && (
+                <span className="text-[var(--color-tint-orange)]"> · {refreshResult.failed} couldn't be priced</span>
+              )}
+            </span>
+            <button onClick={() => setRefreshResult(null)} className="text-[var(--color-text-subtle)] hover:text-[var(--color-text)]">
+              <X size={14} />
+            </button>
+          </div>
+          {refreshResult.errors.length > 0 && (
+            <ul className="mt-1 list-disc pl-5 text-xs text-[var(--color-text-muted)]">
+              {refreshResult.errors.slice(0, 5).map((e) => (
+                <li key={e}>{e}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+      {refreshPrices.isError && (
+        <p className="mb-4 text-sm text-[var(--color-negative)]">
+          {refreshPrices.error instanceof Error ? refreshPrices.error.message : 'Could not refresh prices'}
+        </p>
+      )}
+
+      {summary && (summary.count > 0 || summary.realizedGainInr !== 0) && (
+        <div className="mb-6">
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+            <StatTile
+              icon={Wallet}
+              label="Portfolio value"
+              value={formatINR(summary.totalValueInr, true)}
+              iconColor="text-[var(--color-tint-violet)]"
+              iconBg="bg-[var(--color-tint-violet-bg)]"
+            />
+            <StatTile
+              icon={Coins}
+              label="Invested"
+              value={formatINR(summary.totalInvestedInr, true)}
+              iconColor="text-[var(--color-tint-cyan)]"
+              iconBg="bg-[var(--color-tint-cyan-bg)]"
+            />
+            <StatTile
+              icon={summary.unrealizedGainInr >= 0 ? TrendingUp : TrendingDown}
+              label="Unrealised gain"
+              value={formatINR(summary.unrealizedGainInr, true)}
+              iconColor={summary.unrealizedGainInr >= 0 ? 'text-[var(--color-positive)]' : 'text-[var(--color-negative)]'}
+              iconBg={summary.unrealizedGainInr >= 0 ? 'bg-[var(--color-positive-tint)]' : 'bg-[var(--color-negative-tint)]'}
+              sublabel={{
+                text: summary.unrealizedGainInr >= 0 ? 'Above cost' : 'Below cost',
+                positive: summary.unrealizedGainInr >= 0,
+              }}
+            />
+            <StatTile
+              icon={PiggyBank}
+              label="Realised profit"
+              value={formatINR(summary.realizedGainInr, true)}
+              iconColor={summary.realizedGainInr >= 0 ? 'text-[var(--color-positive)]' : 'text-[var(--color-negative)]'}
+              iconBg={summary.realizedGainInr >= 0 ? 'bg-[var(--color-positive-tint)]' : 'bg-[var(--color-negative-tint)]'}
+              sublabel={{ text: 'From everything sold, at trade-date rates', positive: summary.realizedGainInr >= 0 }}
+            />
+          </div>
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--color-text-muted)]">
+            {summary.maturingSoon.length > 0 && (
+              <span className="inline-flex items-center gap-1">
+                <CalendarClock size={12} />
+                {summary.maturingSoon.length} maturing in the next 90 days
+              </span>
+            )}
+            {summary.unconvertedCurrencies.length > 0 && (
+              <span className="text-[var(--color-tint-orange)]">
+                {summary.unconvertedCurrencies.join(', ')} holdings left out of the rupee totals — no exchange rate yet
+              </span>
+            )}
+          </div>
         </div>
       )}
 
-      {/* Foreign holdings are shown in their own currency rather than added to
-          the rupee total — converting them would need an exchange rate this
-          app has no source for, and adding the raw numbers is simply wrong. */}
       {summary && summary.byCurrency.filter((c) => c.currency !== 'INR').length > 0 && (
         <div className="mb-6 flex flex-wrap gap-3">
           {summary.byCurrency
@@ -235,6 +334,7 @@ export function Investments() {
                   <th className="pb-2 pr-3 text-right font-medium">Invested</th>
                   <th className="pb-2 pr-3 text-right font-medium">Value</th>
                   <th className="pb-2 pr-3 text-right font-medium">Gain</th>
+                  {showsSecurities && <th className="pb-2 pr-3 text-right font-medium">Realised</th>}
                   {!showsSecurities && <th className="pb-2 pr-3 text-right font-medium">Rate</th>}
                   {!showsSecurities && <th className="pb-2 pr-3 font-medium">Matures</th>}
                   <th className="pb-2 w-8" />
@@ -269,16 +369,18 @@ export function Investments() {
                         <button
                           type="button"
                           onClick={() => setEditing(inv)}
-                          title={
-                            inv.priced
-                              ? `Priced ${inv.lastPriceAt || 'recently'} — click to update`
-                              : 'No price yet — click to set one'
-                          }
+                          title={priceTitle(inv)}
                           className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 transition-colors hover:bg-[var(--color-hover)] ${
                             inv.priced ? '' : 'text-[var(--color-text-subtle)]'
                           }`}
                         >
-                          <Tag size={11} />
+                          {inv.quoteError ? (
+                            <AlertTriangle size={11} className="text-[var(--color-tint-orange)]" />
+                          ) : inv.priceSource === 'market' ? (
+                            <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-positive)]" />
+                          ) : (
+                            <Tag size={11} />
+                          )}
                           {inv.lastPrice != null
                             ? formatMoney(inv.lastPrice, inv.currency)
                             : 'set'}
@@ -290,6 +392,9 @@ export function Investments() {
                     </td>
                     <td className="py-2.5 pr-3 text-right font-semibold">
                       {formatMoney(inv.currentValue, inv.currency)}
+                      {isForeign(inv) && inv.valueInr != null && (
+                        <div className="text-xs font-normal text-[var(--color-text-muted)]">{formatINR(inv.valueInr)}</div>
+                      )}
                       {inv.maturityAmount != null && (
                         <div className="text-xs font-normal text-[var(--color-text-muted)]">
                           {formatMoney(inv.maturityAmount, inv.currency)} at maturity
@@ -318,7 +423,34 @@ export function Investments() {
                           </span>
                         </span>
                       )}
+                      {isForeign(inv) && inv.priced && inv.gainInr != null && (
+                        <div
+                          title="In rupees: today's value at today's rate, against cost at each purchase date's rate"
+                          className={`text-xs ${inv.gainInr >= 0 ? 'text-[var(--color-positive)]' : 'text-[var(--color-negative)]'}`}
+                        >
+                          {signedINR(inv.gainInr)}
+                        </div>
+                      )}
                     </td>
+                    {showsSecurities && (
+                      <td className="py-2.5 pr-3 text-right">
+                        {inv.realizedGain !== 0 ? (
+                          <>
+                            <div className={inv.realizedGain >= 0 ? 'text-[var(--color-positive)]' : 'text-[var(--color-negative)]'}>
+                              {inv.realizedGain >= 0 ? '+' : '−'}
+                              {formatMoney(Math.abs(inv.realizedGain), inv.currency)}
+                            </div>
+                            {isForeign(inv) && (
+                              <div className="text-xs text-[var(--color-text-muted)]">
+                                {inv.realizedGainInr != null ? signedINR(inv.realizedGainInr) : 'rupee figure pending'}
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <span className="text-[var(--color-text-subtle)]">—</span>
+                        )}
+                      </td>
+                    )}
                     {!showsSecurities && (
                       <td className="py-2.5 pr-3 text-right text-[var(--color-text-muted)]">
                         {inv.interestRate != null ? `${inv.interestRate}%` : '—'}
@@ -443,7 +575,11 @@ function FXNote({ currency, value }: { currency: string; value: number }) {
       {rate && rate.inrPerUnit > 0 ? (
         <>
           Counted as {formatINR(value * rate.inrPerUnit)} at ₹{rate.inrPerUnit.toFixed(2)}/{currency}
-          {rate.source === 'derived' ? ' — from your own forex transaction' : ' — set by you'}
+          {rate.source === 'derived'
+            ? ' — from your own forex transaction'
+            : rate.source === 'market'
+              ? ' — live market rate'
+              : ' — set by you'}
         </>
       ) : (
         <>Not counted in net worth — no exchange rate yet. Click to set one.</>
@@ -490,6 +626,7 @@ function EditHoldingModal({
     units: holding.units != null ? String(holding.units) : '',
   })
   const [price, setPrice] = useState(holding.lastPrice != null ? String(holding.lastPrice) : '')
+  const [quoteSymbol, setQuoteSymbol] = useState(holding.quoteSymbol ?? '')
   const [error, setError] = useState<string | null>(null)
 
   const trades = useQuery({
@@ -504,23 +641,48 @@ function EditHoldingModal({
     onSaved(updated)
   }
 
+  // The PUT takes the whole record; figures only apply server-side when the holding has no trades.
+  function metaPayload(): Partial<Investment> {
+    return {
+      name: meta.name.trim(),
+      institution: meta.institution.trim(),
+      kind: meta.kind,
+      notes: meta.notes,
+      interestRate: meta.interestRate ? Number(meta.interestRate) : undefined,
+      maturityDate: meta.maturityDate,
+      investedAmount: Number(meta.investedAmount) || 0,
+      currentValue: Number(meta.currentValue) || 0,
+      units: meta.units ? Number(meta.units) : undefined,
+      currency: holding.currency,
+      ...(isSecurity ? { quoteSymbol: quoteSymbol.trim() } : {}),
+    }
+  }
+
   const saveMeta = useMutation({
-    mutationFn: () =>
-      api.investments.update(holding.id, {
-        name: meta.name.trim(),
-        institution: meta.institution.trim(),
-        kind: meta.kind,
-        notes: meta.notes,
-        interestRate: meta.interestRate ? Number(meta.interestRate) : undefined,
-        maturityDate: meta.maturityDate,
-        // Only take effect server-side when the holding has no trades; sent
-        // regardless so the manual-holding path (below) has somewhere to go.
-        investedAmount: Number(meta.investedAmount) || 0,
-        currentValue: Number(meta.currentValue) || 0,
-        units: meta.units ? Number(meta.units) : undefined,
-      }),
+    mutationFn: () => api.investments.update(holding.id, metaPayload()),
     onSuccess: afterMutate,
     onError: (e) => setError(e instanceof Error ? e.message : 'Could not save'),
+  })
+
+  const fetchPrice = useMutation({
+    mutationFn: async () => {
+      // Save a changed symbol first so the fetch uses what's on screen.
+      if (quoteSymbol.trim() !== (holding.quoteSymbol ?? '')) {
+        await api.investments.update(holding.id, metaPayload())
+      }
+      const result = await api.investments.refreshPrices(holding.id)
+      const all = await api.investments.list({ status: 'all' })
+      return { result, updated: all.find((i) => i.id === holding.id) }
+    },
+    onSuccess: ({ result, updated }) => {
+      if (updated) {
+        setQuoteSymbol(updated.quoteSymbol ?? '')
+        if (updated.lastPrice != null) setPrice(String(updated.lastPrice))
+        afterMutate(updated)
+      }
+      if (result.failed > 0) setError(result.errors.join(' · ') || 'Could not fetch a price')
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : 'Could not fetch a price'),
   })
 
   const savePrice = useMutation({
@@ -611,6 +773,52 @@ function EditHoldingModal({
             </Labelled>
           )}
         </div>
+
+        {isSecurity && (
+          <div className="mt-4">
+            <label className="mb-1 block text-xs font-medium text-[var(--color-text-muted)]">Market symbol</label>
+            <SymbolPicker
+              value={quoteSymbol}
+              onChange={setQuoteSymbol}
+              suggestQuery={holding.identifier || holding.name}
+            />
+            {holding.quoteError && quoteSymbol === (holding.quoteSymbol ?? '') && (
+              <p className="mt-1.5 flex items-center gap-1.5 text-xs text-[var(--color-tint-orange)]">
+                <AlertTriangle size={12} />
+                {holding.quoteError}
+              </p>
+            )}
+            <div className="mt-2 flex items-center justify-between gap-3">
+              <span className="text-xs text-[var(--color-text-muted)]">
+                {holding.priceSource === 'market' && holding.lastPrice != null
+                  ? `Live ${formatMoney(holding.lastPrice, holding.currency)} · ${formatPriceTime(holding.lastPriceAt)}`
+                  : 'No live price yet'}
+              </span>
+              <button
+                type="button"
+                onClick={() => fetchPrice.mutate()}
+                disabled={fetchPrice.isPending}
+                className="flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--color-border-strong)] px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-hover)] disabled:opacity-50"
+              >
+                {fetchPrice.isPending ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+                Fetch price now
+              </button>
+            </div>
+            {holding.realizedGain !== 0 && (
+              <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+                Realised profit from sales:{' '}
+                <span className={holding.realizedGain >= 0 ? 'text-[var(--color-positive)]' : 'text-[var(--color-negative)]'}>
+                  {holding.realizedGain >= 0 ? '+' : '−'}
+                  {formatMoney(Math.abs(holding.realizedGain), holding.currency)}
+                </span>
+                {isForeign(holding) &&
+                  (holding.realizedGainInr != null
+                    ? ` (${signedINR(holding.realizedGainInr)} at trade-date rates)`
+                    : ' (rupee figure pending exchange rates)')}
+              </p>
+            )}
+          </div>
+        )}
 
         {holding.hasTrades ? (
           <>
@@ -768,6 +976,12 @@ function TradeRow({
         <span className="text-[var(--color-text-muted)]">
           {trade.side === 'buy' ? 'Bought' : 'Sold'} {Number(trade.shares.toFixed(4))} @{' '}
           {formatMoney(trade.price, trade.currency)}
+          {trade.currency && trade.currency.toUpperCase() !== 'INR' && trade.fxRate != null && (
+            <span className="text-xs text-[var(--color-text-subtle)]">
+              {' '}
+              · ₹{trade.fxRate.toFixed(2)}/{trade.currency}
+            </span>
+          )}
         </span>
         <div className="flex items-center gap-2">
           <span className="text-xs text-[var(--color-text-muted)]">
@@ -963,23 +1177,55 @@ function AddHoldingForm({ onDone, onCancel }: { onDone: () => void; onCancel: ()
     currentValue: '',
     interestRate: '',
     maturityDate: '',
+    quoteSymbol: '',
+    units: '',
+    buyPrice: '',
+    buyDate: new Date().toISOString().slice(0, 10),
   })
+  const isSecurity = SECURITY_KINDS.has(form.kind)
+  const currency = form.kind === 'us_stock' ? 'USD' : 'INR'
 
   const createMutation = useMutation({
-    mutationFn: () =>
-      api.investments.create({
+    mutationFn: async () => {
+      if (!isSecurity) {
+        return api.investments.create({
+          name: form.name.trim(),
+          kind: form.kind,
+          institution: form.institution.trim(),
+          identifier: form.identifier.trim(),
+          investedAmount: Number(form.investedAmount) || 0,
+          // Left blank, the server seeds value from the amount invested.
+          currentValue: Number(form.currentValue) || 0,
+          interestRate: form.interestRate ? Number(form.interestRate) : undefined,
+          maturityDate: form.maturityDate,
+        })
+      }
+      // A stock or fund is its trades: record the buy, so cost and realised profit follow from it.
+      const created = await api.investments.create({
         name: form.name.trim(),
         kind: form.kind,
         institution: form.institution.trim(),
         identifier: form.identifier.trim(),
-        investedAmount: Number(form.investedAmount) || 0,
-        // Left blank, the server seeds value from the amount invested.
-        currentValue: Number(form.currentValue) || 0,
-        interestRate: form.interestRate ? Number(form.interestRate) : undefined,
-        maturityDate: form.maturityDate,
-      }),
+        currency,
+        quoteSymbol: form.quoteSymbol.trim(),
+      })
+      await api.investments.addTrade(created.id, {
+        side: 'buy',
+        shares: Number(form.units),
+        price: Number(form.buyPrice),
+        tradeDate: form.buyDate,
+        orderType: 'manual',
+      })
+      // A failed fetch is recorded on the holding itself, so it mustn't fail the save.
+      await api.investments.refreshPrices(created.id).catch(() => undefined)
+      return created
+    },
     onSuccess: onDone,
   })
+
+  const canSave = isSecurity
+    ? Boolean(form.name.trim()) && Number(form.units) > 0 && Number(form.buyPrice) > 0 && Boolean(form.buyDate)
+    : Boolean(form.name.trim())
 
   const field = (key: keyof typeof form) => ({
     value: form[key],
@@ -1004,25 +1250,60 @@ function AddHoldingForm({ onDone, onCancel }: { onDone: () => void; onCancel: ()
             ))}
           </select>
         </Labelled>
-        <Labelled label="Institution">
-          <input placeholder="HDFC Bank" {...field('institution')} />
-        </Labelled>
-        <Labelled label="Account / folio">
-          <input placeholder="50301125623955" {...field('identifier')} />
-        </Labelled>
-        <Labelled label="Invested">
-          <input type="number" inputMode="decimal" placeholder="10000" {...field('investedAmount')} />
-        </Labelled>
-        <Labelled label="Current value">
-          <input type="number" inputMode="decimal" placeholder="same as invested" {...field('currentValue')} />
-        </Labelled>
-        <Labelled label="Interest rate %">
-          <input type="number" inputMode="decimal" placeholder="7.0" {...field('interestRate')} />
-        </Labelled>
-        <Labelled label="Maturity date">
-          <input type="date" {...field('maturityDate')} />
-        </Labelled>
+        {isSecurity ? (
+          <>
+            <Labelled label="Broker">
+              <input placeholder={form.kind === 'us_stock' ? 'INDmoney' : 'Zerodha'} {...field('institution')} />
+            </Labelled>
+            <Labelled label="ISIN (optional)">
+              <input placeholder={form.kind === 'mutual_fund' ? 'INF846K01WO1' : 'INE002A01018'} {...field('identifier')} />
+            </Labelled>
+            <div className="sm:col-span-2">
+              <span className="mb-1 block text-xs font-medium text-[var(--color-text-muted)]">Market symbol</span>
+              <SymbolPicker
+                value={form.quoteSymbol}
+                onChange={(quoteSymbol) => setForm((f) => ({ ...f, quoteSymbol }))}
+                suggestQuery={form.identifier || form.name}
+              />
+            </div>
+            <Labelled label="Units / shares">
+              <input type="number" inputMode="decimal" placeholder="10" {...field('units')} />
+            </Labelled>
+            <Labelled label={`Buy price per unit (${currency})`}>
+              <input type="number" inputMode="decimal" placeholder={currency === 'USD' ? '185.50' : '1235.30'} {...field('buyPrice')} />
+            </Labelled>
+            <Labelled label="Buy date">
+              <input type="date" {...field('buyDate')} />
+            </Labelled>
+          </>
+        ) : (
+          <>
+            <Labelled label="Institution">
+              <input placeholder="HDFC Bank" {...field('institution')} />
+            </Labelled>
+            <Labelled label="Account / folio">
+              <input placeholder="50301125623955" {...field('identifier')} />
+            </Labelled>
+            <Labelled label="Invested">
+              <input type="number" inputMode="decimal" placeholder="10000" {...field('investedAmount')} />
+            </Labelled>
+            <Labelled label="Current value">
+              <input type="number" inputMode="decimal" placeholder="same as invested" {...field('currentValue')} />
+            </Labelled>
+            <Labelled label="Interest rate %">
+              <input type="number" inputMode="decimal" placeholder="7.0" {...field('interestRate')} />
+            </Labelled>
+            <Labelled label="Maturity date">
+              <input type="date" {...field('maturityDate')} />
+            </Labelled>
+          </>
+        )}
       </div>
+      {isSecurity && (
+        <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+          More buys and sells can be added from the holding afterwards; its live price is fetched as soon as you save.
+        </p>
+      )}
 
       {createMutation.isError && (
         <p className="mt-3 text-sm text-[var(--color-negative)]">
@@ -1033,7 +1314,7 @@ function AddHoldingForm({ onDone, onCancel }: { onDone: () => void; onCancel: ()
       <div className="mt-4 flex items-center gap-2">
         <button
           type="button"
-          disabled={!form.name.trim() || createMutation.isPending}
+          disabled={!canSave || createMutation.isPending}
           onClick={() => createMutation.mutate()}
           className="rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
         >

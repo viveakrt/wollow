@@ -1,6 +1,8 @@
-// Package emailparser turns raw bank/card alert emails (fetched over IMAP,
-// or loaded from a .eml file for testing) into transactions and bill
-// reminders. See hdfc.go, axis.go, and bill.go for per-issuer parsers.
+// Package emailparse decodes raw finance mail (fetched over IMAP, or loaded
+// from a .eml file for testing) into a normalized Email, and knows which
+// senders are financial institutions. What a message *means* — which value is
+// the amount, which the account — is decided by the user-defined rules in
+// money/parserules; there are no per-issuer parsers here.
 package emailparse
 
 import (
