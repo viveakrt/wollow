@@ -69,12 +69,18 @@ export const ACTION_LABELS: Record<string, string> = {
  * `sourceEmail` on a transaction.
  */
 export interface MoneyLink {
-  parsedAs: 'transaction' | 'bill' | 'unrecognized'
+  parsedAs: 'transaction' | 'bill' | 'balance' | 'trade' | 'pending_account' | 'unrecognized'
   transactionId?: number
   billId?: number
+  investmentId?: number
   amount?: number
   dueDate?: string
   issuer?: string
+  /** The user-defined parser that read the message. */
+  ruleId?: number
+  /** For pending_account: the account the message is waiting for. */
+  pendingName?: string
+  pendingLast4?: string
 }
 
 export interface MessageSummary {

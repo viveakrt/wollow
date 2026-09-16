@@ -97,3 +97,26 @@ func TestNoRateWithoutEvidence(t *testing.T) {
 		t.Errorf("INR rate = %v, want 1", got)
 	}
 }
+
+func TestMarketRateReplacesDerivedButNeverManual(t *testing.T) {
+	db := newFXDB(t)
+	if err := SetRate(db, "USD", 96.19, "2026-08-12", "derived", "from forex"); err != nil {
+		t.Fatal(err)
+	}
+	if stored, err := SetMarketRate(db, "usd", 95.85, "2026-09-16"); err != nil || !stored {
+		t.Fatalf("stored=%v err=%v, want the live rate to replace a derived one", stored, err)
+	}
+	if got := RateToINR(db, "USD"); got != 95.85 {
+		t.Errorf("rate = %v, want 95.85", got)
+	}
+
+	if err := SetRate(db, "USD", 90, "2026-09-01", "manual", "set by you"); err != nil {
+		t.Fatal(err)
+	}
+	if stored, _ := SetMarketRate(db, "USD", 95.85, "2026-09-16"); stored {
+		t.Error("a live rate replaced the user's own rate")
+	}
+	if got := RateToINR(db, "USD"); got != 90 {
+		t.Errorf("rate = %v, want the user's 90", got)
+	}
+}

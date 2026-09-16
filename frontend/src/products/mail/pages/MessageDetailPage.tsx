@@ -123,7 +123,11 @@ export function MessageDetailPage() {
                 </p>
                 {message.moneyLink && (
                   <div className="mt-3">
-                    <MoneyLinkChip link={message.moneyLink} />
+                    <MoneyLinkChip
+                      link={message.moneyLink}
+                      accountId={accountIdNum}
+                      uid={Number(messageId)}
+                    />
                   </div>
                 )}
               </div>

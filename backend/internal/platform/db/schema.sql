@@ -143,14 +143,16 @@ CREATE TABLE IF NOT EXISTS finance_accounts (
     credit_limit    REAL NOT NULL DEFAULT 0,      -- cards only; 0 means unknown
     ifsc            TEXT NOT NULL DEFAULT '',
     branch          TEXT NOT NULL DEFAULT '',
-    -- How this row got here: manual, email (discovered by alert ingest), or
-    -- statement. Only 'email' rows have their guessed account_type corrected
-    -- automatically later; a type the user chose is never overwritten.
+    -- How this row got here: manual or statement. 'email' survives only on
+    -- rows from the period when alert ingest created accounts on its own.
     source          TEXT NOT NULL DEFAULT 'manual',
     -- Whether this account's balance counts toward net worth. A family
     -- member's account, or a closed/business account, can be tracked without
     -- distorting the owner's own figures.
     include_in_networth INTEGER NOT NULL DEFAULT 1,
+    -- Set when the account is archived: hidden from the accounts page and the
+    -- dashboard, no longer matched by mail, history kept. '' means active.
+    archived_at     TEXT NOT NULL DEFAULT '',
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -204,6 +206,16 @@ CREATE TABLE IF NOT EXISTS investments (
     -- update the rows, not duplicate them. Empty for hand-entered holdings,
     -- which is why the index below is partial.
     dedupe_key      TEXT NOT NULL DEFAULT '',
+    -- Market symbol prices are fetched for: "AAPL", "RELIANCE.NS", "AMFI:<ISIN>";
+    -- empty means detect it, "none" means never fetch.
+    quote_symbol    TEXT NOT NULL DEFAULT '',
+    quote_error     TEXT NOT NULL DEFAULT '',
+    price_source    TEXT NOT NULL DEFAULT '', -- manual, market, statement
+    -- Derived from the trades (moving average cost): profit locked in by sells,
+    -- and the INR figures at each trade's own exchange rate (NULL while unknown).
+    realized_gain     REAL NOT NULL DEFAULT 0,
+    realized_gain_inr REAL,
+    invested_inr      REAL,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -231,6 +243,7 @@ CREATE TABLE IF NOT EXISTS investment_trades (
     order_type    TEXT NOT NULL DEFAULT '',
     source        TEXT NOT NULL DEFAULT 'email', -- email, manual
     dedupe_key    TEXT NOT NULL DEFAULT '',
+    fx_rate       REAL,                          -- INR per unit of currency on trade_date; NULL until looked up
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -240,17 +253,12 @@ CREATE INDEX IF NOT EXISTS idx_investment_trades_holding
     ON investment_trades(investment_id, trade_date);
 
 -- Exchange rates used to bring foreign holdings into the rupee net worth.
---
--- There is no market feed here, so a rate is either something the user typed
--- or something derived from their own bank's forex transactions — a remittance
--- of INR 99,670.15 for USD 1,036.18 states a rate of 96.19 more credibly than
--- any constant this code could hardcode. `source` records which, so a number
--- moving net worth is never anonymous.
+-- `source` says where each came from, so a number moving net worth is never anonymous.
 CREATE TABLE IF NOT EXISTS fx_rates (
     currency     TEXT PRIMARY KEY,
     inr_per_unit REAL NOT NULL,
     as_of        TEXT NOT NULL DEFAULT '',
-    source       TEXT NOT NULL DEFAULT 'manual', -- manual, derived
+    source       TEXT NOT NULL DEFAULT 'manual', -- manual (always wins), market, derived
     note         TEXT NOT NULL DEFAULT '',
     updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -398,19 +406,68 @@ CREATE TABLE IF NOT EXISTS message_links (
     sender          TEXT NOT NULL DEFAULT '',
     subject         TEXT NOT NULL DEFAULT '',
     received_at     TEXT NOT NULL DEFAULT '',
-    parsed_as       TEXT NOT NULL DEFAULT '',      -- transaction | bill | trade | unrecognized
+    parsed_as       TEXT NOT NULL DEFAULT '',      -- transaction | bill | balance | trade | pending_account | unrecognized
     transaction_id  INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
     bill_id         INTEGER REFERENCES bills(id) ON DELETE SET NULL,
     -- Set when parsed_as='trade'. Mirrors transaction_id/bill_id so a deleted
     -- holding orphans its link the same way a deleted account orphans a
     -- transaction's — which is what lets Rescan find and retry it.
     investment_id   INTEGER REFERENCES investments(id) ON DELETE SET NULL,
+    -- The user-defined parser that read this message, if one did.
+    rule_id         INTEGER REFERENCES email_parser_rules(id) ON DELETE SET NULL,
+    -- When parsed_as='pending_account': what the message said about the
+    -- account it concerns, so the UI can offer to create exactly that account
+    -- and a rescan can find the messages waiting for it.
+    pending_issuer  TEXT NOT NULL DEFAULT '',
+    pending_name    TEXT NOT NULL DEFAULT '',
+    pending_last4   TEXT NOT NULL DEFAULT '',
+    pending_kind    TEXT NOT NULL DEFAULT '',
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_message_link_dedupe
     ON message_links(mail_account_id, rfc_message_id);
 CREATE INDEX IF NOT EXISTS idx_message_link_message ON message_links(message_id);
+
+-- A parser the user defined from the UI: which sender it applies to, and for
+-- each value it extracts, the literal text around that value in the sample
+-- message it was defined on. Ingest applies enabled rules to every finance
+-- message; there are no hard-coded issuer parsers any more.
+--
+-- sample_text is the normalized text the values were marked in. Keeping it is
+-- a deliberate exception to the "no message bodies at rest" rule (like PDF
+-- attachments are): it is one message the user chose, and without it the rule
+-- could not be reopened for editing once the mail is gone from the server.
+CREATE TABLE IF NOT EXISTS email_parser_rules (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                   TEXT NOT NULL,
+    kind                   TEXT NOT NULL DEFAULT 'transaction', -- transaction | bill | balance | trade
+    enabled                INTEGER NOT NULL DEFAULT 1,
+    priority               INTEGER NOT NULL DEFAULT 0,          -- higher is tried first
+    issuer                 TEXT NOT NULL DEFAULT '',            -- institution code; matched against finance_accounts.bank
+    sender_domain          TEXT NOT NULL DEFAULT '',            -- lowercased; equal-or-subdomain match on messages.from_domain
+    sender_email           TEXT NOT NULL DEFAULT '',            -- optional exact sender
+    subject_contains       TEXT NOT NULL DEFAULT '',
+    body_contains          TEXT NOT NULL DEFAULT '',
+    account_id             INTEGER REFERENCES finance_accounts(id) ON DELETE SET NULL, -- bound account, for senders that never state one
+    account_type           TEXT NOT NULL DEFAULT 'bank',
+    attributes             TEXT NOT NULL DEFAULT '{}',          -- JSON: direction, paymentMethod, currency, side, instrumentKind, broker
+    fields                 TEXT NOT NULL DEFAULT '[]',          -- JSON: anchored fields (see money/parserules)
+    sample_mail_account_id INTEGER,
+    sample_uid             INTEGER NOT NULL DEFAULT 0,
+    sample_folder          TEXT NOT NULL DEFAULT 'INBOX',
+    sample_rfc_message_id  TEXT NOT NULL DEFAULT '',
+    sample_subject         TEXT NOT NULL DEFAULT '',
+    sample_from            TEXT NOT NULL DEFAULT '',
+    sample_date            TEXT NOT NULL DEFAULT '',
+    sample_text            TEXT NOT NULL DEFAULT '',
+    match_count            INTEGER NOT NULL DEFAULT 0,
+    last_matched_at        TEXT NOT NULL DEFAULT '',
+    created_at             TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at             TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_parser_rules_sender ON email_parser_rules(sender_domain);
 
 -- One password formula per card issuer (most Indian issuers use a fixed
 -- formula like name+DOB). Encrypted at rest with the same master key as

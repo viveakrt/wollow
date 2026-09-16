@@ -53,8 +53,166 @@ export interface Account {
   source: string
   /** Whether this account's balance moves the net worth figures. */
   includeInNetworth: boolean
+  /** Set when the account was retired: hidden by default, history kept, no longer matched by mail. */
+  archivedAt: string
   createdAt: string
   updatedAt: string
+}
+
+/** Account types a parser rule can attach its mail to. */
+export const RULE_ACCOUNT_TYPES: { value: string; label: string }[] = [
+  { value: 'bank', label: 'Bank account' },
+  { value: 'credit_card', label: 'Credit card' },
+  { value: 'wallet', label: 'Wallet' },
+  { value: 'loan', label: 'Loan' },
+  { value: 'investment', label: 'Investment' },
+]
+
+// ---- User-defined email parsers -------------------------------------------
+
+export type ParserRuleKind = 'transaction' | 'bill' | 'balance' | 'trade'
+
+export const PARSER_KIND_LABELS: Record<ParserRuleKind, string> = {
+  transaction: 'Transaction alert',
+  bill: 'Card statement (bill)',
+  balance: 'Balance update',
+  trade: 'Investment order',
+}
+
+export const PARSER_KIND_HELP: Record<ParserRuleKind, string> = {
+  transaction: 'A debit or credit on a bank account, wallet or card. Becomes a transaction.',
+  bill: 'A credit card statement: amounts due and the due date. Becomes a bill reminder.',
+  balance: 'A balance-only alert. Recorded as the account balance on that date, never as a transaction.',
+  trade: 'A broker order confirmation. Becomes (or updates) a holding, never a ledger transaction.',
+}
+
+export type ParserFieldKind = 'amount' | 'number' | 'last4' | 'date' | 'text' | 'word'
+
+/** One value a kind of rule can extract, from GET /parser-rules/fields. */
+export interface ParserFieldSpec {
+  name: string
+  label: string
+  kind: ParserFieldKind
+  required: boolean
+}
+
+/** A derived field: where the value sat in the sample and the text that anchors it. */
+export interface ParserRuleField {
+  name: string
+  kind: ParserFieldKind
+  prefix: string
+  suffix: string
+  atLineEnd: boolean
+  occurrence: number
+  start: number
+  end: number
+  sample: string
+}
+
+/** A value the user marked in the sample: rune (code point) offsets plus the selected text. */
+export interface LabeledSpan {
+  name: string
+  start: number
+  end: number
+  sample: string
+}
+
+export interface ParserAttributes {
+  direction?: 'expense' | 'income'
+  paymentMethod?: string
+  currency?: string
+  side?: 'buy' | 'sell'
+  instrumentKind?: string
+  broker?: string
+}
+
+export interface ParserSample {
+  mailAccountId: number
+  uid: number
+  folder: string
+  rfcMessageId: string
+  subject: string
+  from: string
+  date: string
+  /** The normalized text the rule is defined on. Absent in list responses. */
+  text?: string
+  fromDomain?: string
+  hasPdf?: boolean
+  /** The registry's guess for the sender, when it knows it. */
+  issuer?: string
+  defaultKind?: string
+}
+
+export interface ParserRule {
+  id: number
+  name: string
+  kind: ParserRuleKind
+  enabled: boolean
+  priority: number
+  issuer: string
+  senderDomain: string
+  senderEmail: string
+  subjectContains: string
+  bodyContains: string
+  /** 0 when the account is found from the extracted digits. */
+  accountId: number
+  accountType: string
+  attributes: ParserAttributes
+  fields: ParserRuleField[]
+  sample: ParserSample
+  matchCount: number
+  lastMatchedAt: string
+  createdAt: string
+  updatedAt: string
+  /** List responses only: whether the stored sample text exists. */
+  hasSample?: boolean
+}
+
+/** What POST/PUT /parser-rules and POST /parser-rules/test accept. */
+export interface ParserRuleInput {
+  name: string
+  kind: ParserRuleKind
+  enabled: boolean
+  priority: number
+  issuer: string
+  senderDomain: string
+  senderEmail: string
+  subjectContains: string
+  bodyContains: string
+  accountId: number
+  accountType: string
+  attributes: ParserAttributes
+  sample: ParserSample
+  /** Marked values; the server derives fields from them. */
+  spans?: LabeledSpan[]
+  /** Already-derived fields, when no spans are sent. */
+  fields?: ParserRuleField[]
+}
+
+export interface ParserTestResult {
+  uid: number
+  subject: string
+  date: string
+  matched: boolean
+  values?: Record<string, string>
+  reason?: string
+}
+
+export interface ParserTestResponse {
+  fields: ParserRuleField[]
+  results: ParserTestResult[]
+}
+
+/** Mail held because it names an account nobody has registered. */
+export interface PendingAccountGroup {
+  issuer: string
+  name: string
+  last4: string
+  kind: string
+  count: number
+  lastSeen: string
+  latestSubject: string
+  sample: { mailAccountId: number; uid: number }
 }
 
 /**
@@ -118,6 +276,8 @@ export interface InvestmentTrade {
   tradeDate: string
   orderType: string
   source: string
+  /** INR per unit of the trade's currency on its trade date, once looked up. */
+  fxRate?: number
   createdAt: string
 }
 
@@ -145,9 +305,22 @@ export interface Investment {
   maturityAmount?: number
   interestRate?: number
   units?: number
-  /** Last known price per unit, and when it was taken. */
+  /** Last known price per unit, and when it was taken (a date, or a timestamp for market prices). */
   lastPrice?: number
   lastPriceAt: string
+  /** manual | market | statement */
+  priceSource: string
+  /** What prices are fetched under ("AAPL", "RELIANCE.NS", "AMFI:<ISIN>"); "none" switches fetching off. */
+  quoteSymbol: string
+  /** Why the last price fetch failed, if it did. */
+  quoteError?: string
+  /** Profit locked in by sells, in the holding's own currency. */
+  realizedGain: number
+  /** Rupee figures: cost and realised profit at each trade's own exchange rate, value at today's. */
+  realizedGainInr?: number
+  investedInr?: number
+  valueInr?: number
+  gainInr?: number
   /** Derived: currentValue − investedAmount, and the same as a percentage. */
   gain: number
   gainPercent: number
@@ -192,6 +365,32 @@ export interface InvestmentSummary {
   }[]
   byKind: { kind: string; count: number; invested: number; value: number }[]
   maturingSoon: Investment[]
+  /** Every holding in rupees; foreign value at today's rate, cost and realised profit at trade-date rates. */
+  totalValueInr: number
+  totalInvestedInr: number
+  unrealizedGainInr: number
+  /** Includes closed holdings — that is where most realised profit sits. */
+  realizedGainInr: number
+  /** Currencies held but left out of the rupee totals for want of a rate. */
+  unconvertedCurrencies: string[]
+  /** When the most recent market price was taken; empty if none has been fetched. */
+  pricesUpdatedAt: string
+}
+
+export interface MarketSearchHit {
+  symbol: string
+  name: string
+  exchange: string
+  quoteType: string
+}
+
+export interface PriceRefreshResult {
+  priced: number
+  failed: number
+  ratesUpdated: string[]
+  tradeRates: number
+  errors: string[]
+  refreshedAt: string
 }
 
 export interface ParsedDeposit {
@@ -207,6 +406,20 @@ export interface ParsedDeposit {
   startDate: string
   maturityDate: string
   dedupeKey: string
+  isDuplicate: boolean
+}
+
+export interface ParsedZerodhaHolding {
+  symbol: string
+  isin: string
+  kind: string // stock | mutual_fund
+  units: number
+  /** Statement's "Previous Closing Price". */
+  price: number
+  /** Statement's "Open Value": current market value of units. */
+  value: number
+  realizedPl: number
+  unrealizedPl: number
   isDuplicate: boolean
 }
 
@@ -410,6 +623,7 @@ export interface EmailAccount {
 export interface Bill {
   id: number
   accountId?: number
+  accountName?: string
   issuer: string
   cardLast4: string
   statementPeriod: string
@@ -417,7 +631,21 @@ export interface Bill {
   minimumDue?: number
   dueDate: string
   status: 'unpaid' | 'paid'
+  /** YYYY-MM-DD the bill was marked paid; empty while unpaid. */
+  paidAt: string
   createdAt: string
+}
+
+/** How a payment compares with what a statement asked for. */
+export type BillCoverage = 'full' | 'minimum' | 'partial' | 'unknown'
+
+/** Offered after linking a transfer into a card: the payment and that card's unpaid bills. */
+export interface BillPaymentSuggestion {
+  accountId: number
+  accountName: string
+  amount: number
+  date: string
+  bills: (Bill & { coverage: BillCoverage })[]
 }
 
 export interface PDFPassword {
@@ -431,6 +659,9 @@ export interface SyncResult {
   transactions: number
   bills: number
   balances: number
+  trades: number
+  /** Read by a rule, but naming an account nobody has registered yet. Held until it exists. */
+  pendingAccount: number
   unrecognized: number
   duplicates: number
   /** Could not be fetched or recorded this pass; retried on the next one. */
@@ -451,8 +682,8 @@ export interface RescanResult extends SyncResult {
 }
 
 export interface ImportPreview {
-  /** Which confirm step applies: a transaction export, or a deposit summary. */
-  kind: 'statement' | 'deposits'
+  /** Which confirm step applies: a transaction export, a deposit summary, or a Zerodha P&L export. */
+  kind: 'statement' | 'deposits' | 'zerodha'
   fileName: string
   bank: string
   /** The account type the file looks like it belongs to; the user can override. */
@@ -471,6 +702,9 @@ export interface ImportPreview {
   transactions: ParsedTransaction[]
   /** Populated instead of `transactions` when `kind` is 'deposits'. */
   deposits?: ParsedDeposit[]
+  /** Populated instead of `transactions` when `kind` is 'zerodha'. */
+  clientId?: string
+  zerodhaHoldings?: ParsedZerodhaHolding[]
 }
 
 /** An exchange rate used to value foreign holdings in rupees. */
@@ -478,7 +712,7 @@ export interface FXRate {
   currency: string
   inrPerUnit: number
   asOf: string
-  /** 'manual' when you set it, 'derived' when read from your own forex data. */
+  /** 'manual' when you set it (always wins), 'market' for the live rate, 'derived' from your own forex data. */
   source: string
   note: string
 }

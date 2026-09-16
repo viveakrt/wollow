@@ -9,7 +9,8 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "test:e2e": "node e2e/smoke.mjs",
-    "test:e2e:links": "node e2e/links.mjs"
+    "test:e2e:links": "node e2e/links.mjs",
+    "test:e2e:parsers": "node e2e/parsers.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",

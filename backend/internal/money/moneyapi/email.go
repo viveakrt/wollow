@@ -1,7 +1,6 @@
 package moneyapi
 
 import (
-	"database/sql"
 	"net/http"
 	"strconv"
 
@@ -67,7 +66,7 @@ func (s *Server) handleSyncEmailAccount(w http.ResponseWriter, r *http.Request) 
 	var result *ingest.Result
 	err = s.withMailSession(r.Context(), id, func(fetcher ingest.RawFetcher) error {
 		var runErr error
-		result, runErr = ingest.RunWithPasswords(r.Context(), s.DB, fetcher, id, "INBOX", s.PDFPasswordLookup())
+		result, runErr = ingest.Run(r.Context(), s.DB, fetcher, id, "INBOX")
 		return runErr
 	})
 	if err != nil {
@@ -86,14 +85,15 @@ type rescanResult struct {
 	*ingest.Result
 }
 
-// handleRescanEmailAccount repairs the two ways a message_links row goes
-// stale: a transaction/bill/trade whose account or holding was later deleted
-// (recreating it should bring the old mail back), and a message that landed
-// 'unrecognized' before its account existed or before the parser learned its
-// template. Once a message is linked, an ordinary sync never looks at it
-// again, so this clears exactly those stuck links (see ingest.RescanStuck —
-// never a link still pointing at a real row) and immediately re-ingests them,
-// recovering everything fixable in one action.
+// handleRescanEmailAccount repairs the ways a message_links row goes stale: a
+// transaction/bill/trade whose account or holding was later deleted
+// (recreating it should bring the old mail back), a message held for an
+// account that has since been added, and a message that landed
+// 'unrecognized' before a rule for it existed. Once a message is linked, an
+// ordinary sync never looks at it again, so this clears exactly those stuck
+// links (see ingest.RescanStuck — never a link still pointing at a real row)
+// and immediately re-ingests them, recovering everything fixable in one
+// action.
 func (s *Server) handleRescanEmailAccount(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -116,7 +116,7 @@ func (s *Server) handleRescanEmailAccount(w http.ResponseWriter, r *http.Request
 	var result *ingest.Result
 	err = s.withMailSession(r.Context(), id, func(fetcher ingest.RawFetcher) error {
 		var runErr error
-		result, runErr = ingest.RunWithPasswords(r.Context(), s.DB, fetcher, id, "INBOX", s.PDFPasswordLookup())
+		result, runErr = ingest.Run(r.Context(), s.DB, fetcher, id, "INBOX")
 		return runErr
 	})
 	if err != nil {
@@ -125,38 +125,4 @@ func (s *Server) handleRescanEmailAccount(w http.ResponseWriter, r *http.Request
 	}
 
 	httpx.WriteJSON(w, 200, rescanResult{Cleared: cleared, Result: result})
-}
-
-func (s *Server) handleListBills(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.DB.Query(`
-		SELECT id, account_id, issuer, card_last4, statement_period, total_due, minimum_due, due_date, status, created_at
-		FROM bills ORDER BY created_at DESC LIMIT 100`)
-	if err != nil {
-		httpx.WriteError(w, 500, err.Error())
-		return
-	}
-	defer rows.Close()
-
-	bills := []models.Bill{}
-	for rows.Next() {
-		var b models.Bill
-		var accountID sql.NullInt64
-		var totalDue, minDue sql.NullFloat64
-		if err := rows.Scan(&b.ID, &accountID, &b.Issuer, &b.CardLast4, &b.StatementPeriod,
-			&totalDue, &minDue, &b.DueDate, &b.Status, &b.CreatedAt); err != nil {
-			httpx.WriteError(w, 500, err.Error())
-			return
-		}
-		if accountID.Valid {
-			b.AccountID = &accountID.Int64
-		}
-		if totalDue.Valid {
-			b.TotalDue = &totalDue.Float64
-		}
-		if minDue.Valid {
-			b.MinimumDue = &minDue.Float64
-		}
-		bills = append(bills, b)
-	}
-	httpx.WriteJSON(w, 200, bills)
 }

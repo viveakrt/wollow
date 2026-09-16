@@ -15,6 +15,7 @@ interface MessageRowProps {
 }
 
 export function MessageRow({
+  accountId,
   message,
   selected = false,
   onToggleSelect,
@@ -100,7 +101,12 @@ export function MessageRow({
             )}
             {message.moneyLink && (
               <span className="shrink-0">
-                <MoneyLinkChip link={message.moneyLink} compact />
+                <MoneyLinkChip
+                  link={message.moneyLink}
+                  compact
+                  accountId={accountId}
+                  uid={Number(message.id)}
+                />
               </span>
             )}
           </div>

@@ -92,6 +92,79 @@ func TestImportDepositsIsIdempotent(t *testing.T) {
 	}
 }
 
+// Re-importing a Zerodha Console P&L export must re-price the holding it
+// names rather than seed a second buy — a P&L export is a valuation snapshot,
+// the same as a deposit summary, just reached through a different commit
+// route because it writes investment_trades instead of investments directly.
+func TestImportZerodhaPnLIsIdempotent(t *testing.T) {
+	server, mux := newTestServer(t)
+
+	body := `{"fileName":"pnl-YPQ985.xlsx","asOf":"2026-08-19","holdings":[
+		{"symbol":"MAHABANK","isin":"INE457A01014","kind":"stock",
+		 "units":1000,"price":79.85,"value":58800}]}`
+
+	first := do(t, mux, "POST", "/api/money/import/zerodha/commit", body)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first commit: %d %s", first.Code, first.Body.String())
+	}
+	if got := decode[map[string]int](t, first); got["imported"] != 1 {
+		t.Errorf("first commit imported = %d, want 1", got["imported"])
+	}
+
+	var count int
+	if err := server.DB.QueryRow(`SELECT COUNT(*) FROM investments WHERE institution = 'Zerodha'`).Scan(&count); err != nil {
+		t.Fatalf("counting investments: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("investments table has %d Zerodha rows, want 1", count)
+	}
+	var units, value float64
+	if err := server.DB.QueryRow(`SELECT units, current_value FROM investments WHERE institution = 'Zerodha'`).
+		Scan(&units, &value); err != nil {
+		t.Fatalf("reading holding: %v", err)
+	}
+	if units != 1000 {
+		t.Errorf("units = %.2f, want 1000", units)
+	}
+	// RecomputeHolding values a priced position at last_price * units, not at
+	// the statement's own "Open Value" figure (which can differ slightly,
+	// e.g. by an average-cost adjustment) — same as the existing Zerodha
+	// holdings-email path this reuses.
+	if want := 79.85 * 1000; value != want {
+		t.Errorf("current_value = %.2f, want %.2f", value, want)
+	}
+
+	// A later statement reprices the same holding rather than buying it again.
+	second := do(t, mux, "POST", "/api/money/import/zerodha/commit",
+		`{"fileName":"pnl-YPQ985-later.xlsx","asOf":"2026-09-19","holdings":[
+			{"symbol":"MAHABANK","isin":"INE457A01014","kind":"stock",
+			 "units":1000,"price":90,"value":90000}]}`)
+	if second.Code != http.StatusOK {
+		t.Fatalf("second commit: %d %s", second.Code, second.Body.String())
+	}
+	result := decode[map[string]int](t, second)
+	if result["imported"] != 0 || result["updated"] != 1 {
+		t.Errorf("second commit imported=%d updated=%d, want 0 and 1", result["imported"], result["updated"])
+	}
+
+	if err := server.DB.QueryRow(`SELECT COUNT(*) FROM investments WHERE institution = 'Zerodha'`).Scan(&count); err != nil {
+		t.Fatalf("counting investments: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("investments table has %d Zerodha rows after re-import, want 1", count)
+	}
+	if err := server.DB.QueryRow(`SELECT units, current_value FROM investments WHERE institution = 'Zerodha'`).
+		Scan(&units, &value); err != nil {
+		t.Fatalf("reading repriced holding: %v", err)
+	}
+	if units != 1000 {
+		t.Errorf("units after reprice = %.2f, want 1000 (unchanged)", units)
+	}
+	if value != 90000 { // last_price(90) * units(1000)
+		t.Errorf("current_value after reprice = %.2f, want 90000", value)
+	}
+}
+
 // Hand-entered holdings carry no dedupe key. The unique index is partial for
 // exactly that reason, and several of them must be able to coexist.
 func TestManualInvestmentsCoexistWithoutDedupeKeys(t *testing.T) {

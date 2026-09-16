@@ -1,6 +1,9 @@
 # Secrets
 .env
 
+# Real bank statements and sample mail used by the parser tests — never publish these
+statements/
+
 # Go
 backend/data/
 backend/wollow-server

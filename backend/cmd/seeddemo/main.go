@@ -3,11 +3,13 @@
 // mailbox.
 //
 // It writes exactly what a sync pass followed by a finance ingest pass would
-// have written: a mailbox, an indexed message per sample, and the transactions,
-// bills and message_links that ingest derives from them. Message bodies are not
-// stored (the index never stores them), so opening a message in the UI will
-// still try to reach IMAP and fail — everything else, including both directions
-// of the Mail ↔ Money links, works.
+// have written: a mailbox, an indexed message per sample, and the message_links
+// that ingest derives from them. Ingest reads mail only through the parser
+// rules the user has defined, so on a fresh database every sample lands as
+// 'unrecognized' until rules exist; defining one and rescanning then imports
+// them. Message bodies are not stored (the index never stores them), so
+// opening a message in the UI will still try to reach IMAP and fail —
+// everything else, including both directions of the Mail ↔ Money links, works.
 //
 // Development only. Never point this at a database you care about.
 package main

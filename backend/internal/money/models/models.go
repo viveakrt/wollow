@@ -14,15 +14,18 @@ type Account struct {
 	CreditLimit float64 `json:"creditLimit"`
 	IFSC        string  `json:"ifsc"`
 	Branch      string  `json:"branch"`
-	// Source is how the row got here: manual, email (discovered by alert
-	// ingest) or statement.
+	// Source is how the row got here: manual or statement ('email' only on
+	// rows from when alert ingest created accounts on its own).
 	Source string `json:"source"`
 	// IncludeInNetWorth decides whether this balance counts toward the
 	// dashboard's net worth figures. A tracked family account or a closed
 	// account stays visible but stops moving the owner's totals.
-	IncludeInNetWorth bool   `json:"includeInNetworth"`
-	CreatedAt         string `json:"createdAt"`
-	UpdatedAt         string `json:"updatedAt"`
+	IncludeInNetWorth bool `json:"includeInNetworth"`
+	// ArchivedAt is set when the account was retired: hidden by default,
+	// history kept, no longer matched by mail. Empty for an active account.
+	ArchivedAt string `json:"archivedAt"`
+	CreatedAt  string `json:"createdAt"`
+	UpdatedAt  string `json:"updatedAt"`
 }
 
 // Investment is a deposit or holding: a fixed deposit, PPF/EPF/NPS balance, a
@@ -48,6 +51,18 @@ type Investment struct {
 	// LastPrice is the most recent per-unit price known for this holding.
 	LastPrice   *float64 `json:"lastPrice,omitempty"`
 	LastPriceAt string   `json:"lastPriceAt"`
+	// PriceSource is manual, market or statement.
+	PriceSource string `json:"priceSource"`
+	// QuoteSymbol is what prices are fetched under ("AAPL", "RELIANCE.NS", "AMFI:<ISIN>"); "none" turns fetching off.
+	QuoteSymbol string `json:"quoteSymbol"`
+	QuoteError  string `json:"quoteError,omitempty"`
+	// RealizedGain is profit locked in by sells, in the holding's currency.
+	RealizedGain float64 `json:"realizedGain"`
+	// The INR figures use each trade's own exchange rate for cost and today's for value; nil while unknown.
+	RealizedGainINR *float64 `json:"realizedGainInr,omitempty"`
+	InvestedINR     *float64 `json:"investedInr,omitempty"`
+	ValueINR        *float64 `json:"valueInr,omitempty"`
+	GainINR         *float64 `json:"gainInr,omitempty"`
 	// Gain and GainPercent are derived from invested vs current value.
 	Gain        float64 `json:"gain"`
 	GainPercent float64 `json:"gainPercent"`
@@ -95,6 +110,35 @@ type ParsedDepositSummary struct {
 	Institution string          `json:"institution"`
 	Kind        string          `json:"kind"`
 	Deposits    []ParsedDeposit `json:"deposits"`
+}
+
+// ParsedZerodhaHolding is one currently-open position read out of a Zerodha
+// Console P&L export (Console > Reports > P&L statement, downloaded as
+// .xlsx). Like a demat holdings snapshot, this is a valuation as of the
+// statement's own "as of" date, not a purchase record — Units/Price/Value
+// are what RecordHoldingSnapshot expects to seed or re-price a position with.
+type ParsedZerodhaHolding struct {
+	Symbol string  `json:"symbol"`
+	ISIN   string  `json:"isin"`
+	Kind   string  `json:"kind"` // stock | mutual_fund
+	Units  float64 `json:"units"`
+	// Price is the statement's "Previous Closing Price" — the per-unit market
+	// price the open position was valued at.
+	Price        float64 `json:"price"`
+	Value        float64 `json:"value"` // "Open Value": current market value of Units
+	RealizedPL   float64 `json:"realizedPl"`
+	UnrealizedPL float64 `json:"unrealizedPl"`
+	IsDuplicate  bool    `json:"isDuplicate"`
+}
+
+// ParsedZerodhaPnL is a whole Console P&L export: one instrument class
+// (equity or mutual funds) for one client, over one statement period.
+type ParsedZerodhaPnL struct {
+	ClientID   string                 `json:"clientId"`
+	Kind       string                 `json:"kind"`
+	PeriodFrom string                 `json:"periodFrom"`
+	PeriodTo   string                 `json:"periodTo"`
+	Holdings   []ParsedZerodhaHolding `json:"holdings"`
 }
 
 type Category struct {
@@ -250,6 +294,7 @@ type EmailAccount struct {
 type Bill struct {
 	ID              int64    `json:"id"`
 	AccountID       *int64   `json:"accountId,omitempty"`
+	AccountName     string   `json:"accountName,omitempty"`
 	Issuer          string   `json:"issuer"`
 	CardLast4       string   `json:"cardLast4"`
 	StatementPeriod string   `json:"statementPeriod"`
@@ -257,6 +302,7 @@ type Bill struct {
 	MinimumDue      *float64 `json:"minimumDue,omitempty"`
 	DueDate         string   `json:"dueDate"`
 	Status          string   `json:"status"`
+	PaidAt          string   `json:"paidAt"`
 	CreatedAt       string   `json:"createdAt"`
 }
 
@@ -319,7 +365,9 @@ type InvestmentTrade struct {
 	TradeDate    string  `json:"tradeDate"`
 	OrderType    string  `json:"orderType"`
 	Source       string  `json:"source"`
-	CreatedAt    string  `json:"createdAt"`
+	// FXRate is INR per unit of Currency on TradeDate, once looked up.
+	FXRate    *float64 `json:"fxRate,omitempty"`
+	CreatedAt string   `json:"createdAt"`
 }
 
 // ParsedBillEmail is what a statement/bill email parser extracts.

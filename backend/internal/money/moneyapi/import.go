@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"wollow/backend/internal/money/ledger"
 	"wollow/backend/internal/platform/httpx"
@@ -16,8 +17,9 @@ import (
 
 type importPreviewResponse struct {
 	// Kind routes the client to the right confirm step: "statement" for a
-	// transaction export, "deposits" for an FD/RD summary. One upload endpoint
-	// handles both because the user just has a file, not a taxonomy.
+	// transaction export, "deposits" for an FD/RD summary, "zerodha" for a
+	// Console P&L export. One upload endpoint handles all three because the
+	// user just has a file, not a taxonomy.
 	Kind             string               `json:"kind"`
 	FileName         string               `json:"fileName"`
 	Bank             string               `json:"bank"`
@@ -36,6 +38,10 @@ type importPreviewResponse struct {
 	Transactions     []previewTransaction `json:"transactions"`
 	// Deposits is populated instead of Transactions when Kind is "deposits".
 	Deposits []models.ParsedDeposit `json:"deposits,omitempty"`
+	// ClientID and ZerodhaHoldings are populated instead of Transactions when
+	// Kind is "zerodha".
+	ClientID        string                        `json:"clientId,omitempty"`
+	ZerodhaHoldings []models.ParsedZerodhaHolding `json:"zerodhaHoldings,omitempty"`
 }
 
 type matchedAccount struct {
@@ -80,8 +86,13 @@ func (s *Server) handleImportHDFCPreview(w http.ResponseWriter, r *http.Request)
 	}
 	defer os.Remove(tmpPath)
 
-	// An FD summary and an account statement arrive through the same upload,
-	// and the user has no reason to know they are parsed differently.
+	// An FD summary, a Zerodha Console P&L export and an account statement all
+	// arrive through the same upload, and the user has no reason to know they
+	// are parsed differently.
+	if parsers.IsZerodhaPnLStatement(tmpPath) {
+		s.previewZerodhaPnL(w, tmpPath, fileName)
+		return
+	}
 	if parsers.IsDepositSummary(tmpPath) {
 		s.previewDepositSummary(w, tmpPath, fileName)
 		return
@@ -200,6 +211,102 @@ func (s *Server) previewDepositSummary(w http.ResponseWriter, tmpPath, fileName 
 		}
 	}
 	httpx.WriteJSON(w, 200, resp)
+}
+
+// previewZerodhaPnL answers the upload with the open positions a Console
+// P&L export reports, marking the ones already on file (matched on ISIN
+// under the Zerodha institution) so a re-import reads as a re-price rather
+// than a duplication.
+func (s *Server) previewZerodhaPnL(w http.ResponseWriter, tmpPath, fileName string) {
+	pnl, err := parsers.ParseZerodhaPnLStatement(tmpPath)
+	if err != nil {
+		httpx.WriteError(w, 422, "could not parse Zerodha P&L statement: "+err.Error())
+		return
+	}
+
+	resp := importPreviewResponse{
+		Kind:            "zerodha",
+		FileName:        fileName,
+		Bank:            "Zerodha",
+		AccountType:     "investment",
+		ClientID:        pnl.ClientID,
+		StatementFrom:   pnl.PeriodFrom,
+		StatementTo:     pnl.PeriodTo,
+		TotalRows:       len(pnl.Holdings),
+		ZerodhaHoldings: pnl.Holdings,
+	}
+	for i := range resp.ZerodhaHoldings {
+		var existing int
+		s.DB.QueryRow(`SELECT COUNT(*) FROM investments WHERE institution = 'Zerodha' AND identifier = ?`,
+			resp.ZerodhaHoldings[i].ISIN).Scan(&existing)
+		resp.ZerodhaHoldings[i].IsDuplicate = existing > 0
+		if existing > 0 {
+			resp.DuplicateRows++
+		} else {
+			resp.NewRows++
+		}
+	}
+	httpx.WriteJSON(w, 200, resp)
+}
+
+type importZerodhaRequest struct {
+	FileName string `json:"fileName"`
+	// AsOf is the statement's own period-end date; the price/quantity
+	// snapshot is dated to it rather than to import time, matching the
+	// Console export's own "as of" figures.
+	AsOf     string                        `json:"asOf"`
+	Holdings []models.ParsedZerodhaHolding `json:"holdings"`
+}
+
+// handleImportZerodhaCommit brings each holding a Console P&L export reports
+// open to a known price and quantity — the same mechanism a Zerodha holding
+// statement email uses (see ledger.RecordHoldingSnapshot). A position with
+// real trade history already on file only has its price moved forward; one
+// with none is seeded at this snapshot's quantity and value.
+func (s *Server) handleImportZerodhaCommit(w http.ResponseWriter, r *http.Request) {
+	var req importZerodhaRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, 400, "invalid body")
+		return
+	}
+	if len(req.Holdings) == 0 {
+		httpx.WriteError(w, 400, "holdings is required and must be non-empty")
+		return
+	}
+	asOf := req.AsOf
+	if asOf == "" {
+		asOf = time.Now().Format("2006-01-02")
+	}
+
+	imported, updated := 0, 0
+	for _, h := range req.Holdings {
+		var existing int
+		s.DB.QueryRow(`SELECT COUNT(*) FROM investments WHERE institution = 'Zerodha' AND identifier = ?`,
+			h.ISIN).Scan(&existing)
+
+		if _, err := ledger.RecordHoldingSnapshot(s.DB, models.ParsedTrade{
+			Symbol: h.Symbol, Identifier: h.ISIN, Broker: "Zerodha",
+			Currency: "INR", Kind: h.Kind,
+		}, h.Units, h.Price, h.Value, asOf); err != nil {
+			httpx.WriteError(w, 500, err.Error())
+			return
+		}
+		if existing == 0 {
+			imported++
+		} else {
+			updated++
+		}
+	}
+
+	if _, err := s.DB.Exec(`
+		INSERT INTO import_batches (file_name, bank, total_rows, imported_rows, duplicate_rows, status)
+		VALUES (?, 'Zerodha', ?, ?, ?, 'done')`,
+		req.FileName, len(req.Holdings), imported, updated); err != nil {
+		httpx.WriteError(w, 500, err.Error())
+		return
+	}
+
+	httpx.WriteJSON(w, 200, map[string]int{"imported": imported, "updated": updated})
 }
 
 type importDepositsRequest struct {

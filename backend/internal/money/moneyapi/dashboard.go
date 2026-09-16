@@ -222,9 +222,12 @@ func (s *Server) handleDashboardSummary(w http.ResponseWriter, r *http.Request) 
 	}
 	kindRows.Close()
 
+	// Archived accounts are out of the picture entirely: their history still
+	// counts in the cash-flow figures above (it happened), but a retired
+	// account's balance is not part of what the user holds today.
 	rows, err := s.DB.Query(`
 		SELECT id, name, account_type, bank, current_balance, credit_limit, include_in_networth
-		FROM finance_accounts ORDER BY id`)
+		FROM finance_accounts WHERE archived_at = '' ORDER BY id`)
 	if err != nil {
 		httpx.WriteError(w, 500, err.Error())
 		return

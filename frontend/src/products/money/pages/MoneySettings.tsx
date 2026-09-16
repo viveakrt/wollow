@@ -84,7 +84,12 @@ export function MoneySettings() {
       <Card title="Mailboxes">
         <p className="mb-4 text-sm text-[var(--color-text-muted)]">
           Mailboxes are connected once in Mail and shared by both products — Money reads bank and
-          card alerts out of the same inbox, and only from known issuer senders.
+          card alerts out of the same inbox, through the{' '}
+          <Link to="/money/parsers" className="text-[var(--color-accent-2)] underline">
+            parsers you define
+          </Link>
+          . Accounts are never created from mail; mail naming an unknown account is held until you
+          add it.
         </p>
 
         {mailboxes.isPending ? (
@@ -111,6 +116,15 @@ export function MoneySettings() {
                         {lastSync.result.transactions !== 1 ? 's' : ''}, {lastSync.result.bills} bill
                         {lastSync.result.bills !== 1 ? 's' : ''} ({lastSync.result.scanned} emails scanned)
                       </div>
+                      {lastSync.result.pendingAccount > 0 && (
+                        <div className="mt-1 text-xs text-[var(--color-tint-orange)]">
+                          {lastSync.result.pendingAccount} waiting for an account to be added —{' '}
+                          <Link to="/money/accounts" className="underline">
+                            see which
+                          </Link>
+                          .
+                        </div>
+                      )}
                       {/* This used to be invisible, which is how a stalled
                           import looked exactly like a finished one. */}
                       {lastSync.result.failed > 0 && (

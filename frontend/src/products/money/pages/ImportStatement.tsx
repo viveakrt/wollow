@@ -70,6 +70,20 @@ export function ImportStatement() {
         return
       }
 
+      // A Zerodha P&L export likewise has no account to pick — each row
+      // re-prices (or seeds) the holding it names directly.
+      if (preview.kind === 'zerodha') {
+        const res = await api.import.zerodhaCommit(
+          preview.fileName,
+          preview.statementTo,
+          preview.zerodhaHoldings ?? [],
+        )
+        setResult({ importedRows: res.imported, duplicateRows: res.updated, noun: 'holding' })
+        setStep('done')
+        queryClient.invalidateQueries({ queryKey: ['money'] })
+        return
+      }
+
       const payload: Record<string, unknown> = {
         fileName: preview.fileName,
         // Sent even when importing into an existing account: an account added
@@ -105,14 +119,16 @@ export function ImportStatement() {
   }
 
   const isDeposits = preview?.kind === 'deposits'
+  const isZerodha = preview?.kind === 'zerodha'
 
   return (
     <div className="p-8 max-w-4xl mx-auto">
       <div className="mb-6">
         <h1 className="text-2xl font-semibold tracking-tight">Import Statement</h1>
         <p className="text-[var(--color-text-muted)] text-sm mt-1">
-          Upload an HDFC Bank .xls export — an account or PPF statement becomes transactions, a
-          fixed-deposit summary becomes holdings. Which is which is worked out from the file.
+          Upload an HDFC Bank .xls export or a Zerodha Console P&amp;L .xlsx export — an account or
+          PPF statement becomes transactions, a fixed-deposit summary or a Zerodha Equity/Mutual
+          Funds P&amp;L becomes holdings. Which is which is worked out from the file.
         </p>
       </div>
 
@@ -147,14 +163,15 @@ export function ImportStatement() {
                 <Upload size={36} className="text-[var(--color-text-muted)] mb-4" />
                 <p className="font-medium mb-1">Drag &amp; drop your statement here</p>
                 <p className="text-sm text-[var(--color-text-muted)]">
-                  or click to browse — HDFC account, PPF and FD summary .xls exports
+                  or click to browse — HDFC account, PPF and FD summary .xls exports, or a Zerodha
+                  Console P&amp;L .xlsx export
                 </p>
               </>
             )}
             <input
               ref={fileInputRef}
               type="file"
-              accept=".xls"
+              accept=".xls,.xlsx"
               className="hidden"
               onChange={(e) => {
                 const file = e.target.files?.[0]
@@ -246,7 +263,90 @@ export function ImportStatement() {
         </div>
       )}
 
-      {step === 'review' && preview && !isDeposits && (
+      {step === 'review' && preview && isZerodha && (
+        <div className="mt-5 space-y-5">
+          <Card>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <SummaryStat
+                label="Client"
+                value={preview.clientId ? `Zerodha • ${preview.clientId}` : 'Zerodha'}
+              />
+              <SummaryStat label="Open Positions" value={String(preview.totalRows)} />
+              <SummaryStat label="New" value={String(preview.newRows)} positive />
+              <SummaryStat label="Already Tracked" value={String(preview.duplicateRows)} muted />
+            </div>
+            <p className="mt-4 border-t border-[var(--color-border)] pt-4 text-sm text-[var(--color-text-muted)]">
+              Only currently-open positions from the P&amp;L statement ({formatDate(preview.statementFrom)} –{' '}
+              {formatDate(preview.statementTo)}) are imported — a position fully closed within that
+              period has nothing left to hold. Holdings already tracked have their price and quantity
+              refreshed rather than duplicated.
+            </p>
+          </Card>
+
+          <Card title={`Preview (${preview.zerodhaHoldings?.length ?? 0} holdings)`}>
+            <div className="max-h-96 overflow-y-auto rounded-lg border border-[var(--color-border)]">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-[var(--color-surface-2)]">
+                  <tr className="text-xs uppercase text-[var(--color-text-muted)]">
+                    <th className="px-3 py-2 text-left font-medium">Instrument</th>
+                    <th className="px-3 py-2 text-left font-medium">Kind</th>
+                    <th className="px-3 py-2 text-right font-medium">Units</th>
+                    <th className="px-3 py-2 text-right font-medium">Price</th>
+                    <th className="px-3 py-2 text-right font-medium">Value</th>
+                    <th className="w-20 px-3 py-2 text-left font-medium">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(preview.zerodhaHoldings ?? []).map((h) => (
+                    <tr key={h.isin} className="border-t border-[var(--color-border)]">
+                      <td className="px-3 py-2">
+                        <div>{h.symbol}</div>
+                        <div className="text-xs text-[var(--color-text-muted)]">{h.isin}</div>
+                      </td>
+                      <td className="px-3 py-2 text-[var(--color-text-muted)]">
+                        {h.kind === 'mutual_fund' ? 'Mutual Fund' : 'Stock'}
+                      </td>
+                      <td className="px-3 py-2 text-right">{h.units}</td>
+                      <td className="px-3 py-2 text-right">{formatINR(h.price)}</td>
+                      <td className="px-3 py-2 text-right">{formatINR(h.value)}</td>
+                      <td className="px-3 py-2">
+                        {h.isDuplicate ? (
+                          <span className="rounded-full bg-[var(--color-hover)] px-2 py-0.5 text-xs text-[var(--color-text-muted)]">
+                            Update
+                          </span>
+                        ) : (
+                          <span className="rounded-full bg-[var(--color-positive-tint)] px-2 py-0.5 text-xs text-[var(--color-positive)]">
+                            New
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+
+          <div className="flex justify-end gap-3">
+            <button
+              onClick={() => setStep('upload')}
+              className="rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm font-medium hover:bg-[var(--color-hover)]"
+            >
+              Back
+            </button>
+            <button
+              onClick={handleCommit}
+              disabled={committing || preview.totalRows === 0}
+              className="flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {committing && <Loader2 size={16} className="animate-spin" />}
+              Save {preview.totalRows} holding{preview.totalRows !== 1 ? 's' : ''}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === 'review' && preview && !isDeposits && !isZerodha && (
         <div className="mt-5 space-y-5">
           <Card>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">

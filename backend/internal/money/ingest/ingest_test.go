@@ -4,30 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"wollow/backend/internal/mail"
-	"wollow/backend/internal/money/emailparse"
+	"wollow/backend/internal/money/parserules"
 	"wollow/backend/internal/platform/db"
 )
 
-// sample is one real .eml from statements/, already parsed far enough to fill
-// in the index row that Mail's sync pass would have written for it.
-type sample struct {
-	name       string
-	uid        uint32
-	raw        []byte
-	from       string
-	fromDomain string
-	subject    string
-	rfcID      string
-}
-
-// fakeFetcher stands in for a live IMAP connection, serving the sample bodies
-// by UID. Ingest is supposed to reach the network only for messages it has
+// fakeFetcher stands in for a live IMAP connection, serving message bodies by
+// UID. Ingest is supposed to reach the network only for messages it has
 // already picked out of the index, so this also records what it asked for.
 type fakeFetcher struct {
 	byUID     map[uint32][]byte
@@ -57,108 +44,33 @@ func (f *fakeFetcher) FetchRaw(_ context.Context, _ string, uids []uint32) ([]ma
 	return out, nil
 }
 
-func loadSamples(t *testing.T) []sample {
-	t.Helper()
-	// Repo root, four levels up from internal/money/ingest.
-	dir := filepath.Join("..", "..", "..", "..", "statements")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("sample dir %s not found: %v", dir, err)
-	}
-
-	var out []sample
-	var uid uint32 = 100
-	for _, e := range entries {
-		if filepath.Ext(e.Name()) != ".eml" {
-			continue
-		}
-		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err != nil {
-			t.Fatalf("read %s: %v", e.Name(), err)
-		}
-		parsed, err := emailparse.ParseEML(raw)
-		if err != nil {
-			t.Fatalf("parse %s: %v", e.Name(), err)
-		}
-		uid++
-		s := sample{
-			name:    e.Name(),
-			uid:     uid,
-			raw:     raw,
-			from:    parsed.From,
-			subject: parsed.Subject,
-			rfcID:   parsed.MessageID,
-		}
-		// Mirror how sync derives from_domain, since candidate selection keys
-		// off exactly that column.
-		if at := strings.LastIndex(s.from, "@"); at != -1 {
-			s.fromDomain = strings.ToLower(s.from[at+1:])
-		}
-		out = append(out, s)
-	}
-	if len(out) == 0 {
-		t.Fatal("no .eml samples found")
-	}
-	return out
+// message is one email as it would sit in the mailbox: its raw bytes plus the
+// header facts Mail's sync pass indexes.
+type message struct {
+	uid     uint32
+	from    string
+	subject string
+	body    string
+	raw     []byte
+	rfcID   string
 }
 
-// seedIndex writes the mail_accounts + messages rows that a sync pass would
-// have produced for these samples, without any Money-side rows.
-func seedIndex(t *testing.T, conn *sql.DB, samples []sample) int64 {
-	t.Helper()
-	res, err := conn.Exec(`
-		INSERT INTO mail_accounts (label, imap_host, imap_port, username, encrypted_password)
-		VALUES ('Test', 'imap.example.com', 993, 'test@example.com', 'x')`)
-	if err != nil {
-		t.Fatalf("seed mail account: %v", err)
-	}
-	accountID, _ := res.LastInsertId()
+var messageSeq int
 
-	for _, s := range samples {
-		if _, err := conn.Exec(`
-			INSERT INTO messages (account_id, folder, uid, rfc_message_id, subject, from_email, from_domain, date)
-			VALUES (?, 'INBOX', ?, ?, ?, ?, ?, '')`,
-			accountID, s.uid, s.rfcID, s.subject, s.from, s.fromDomain); err != nil {
-			t.Fatalf("seed message %s: %v", s.name, err)
-		}
-	}
-	return accountID
+func newMessage(uid uint32, from, subject, body string) message {
+	messageSeq++
+	rfcID := fmt.Sprintf("<msg-%d-%d@example.com>", uid, messageSeq)
+	raw := []byte("From: " + from + "\r\nTo: me@example.com\r\nSubject: " + subject +
+		"\r\nDate: Tue, 12 Aug 2026 10:00:00 +0530\r\nMessage-ID: " + rfcID +
+		"\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" + body + "\r\n")
+	return message{uid: uid, from: from, subject: subject, body: body, raw: raw, rfcID: rfcID}
 }
 
-// seedAccounts registers the accounts the sample emails refer to.
-//
-// Ingest no longer invents accounts, so this is the setup a real user performs
-// once by approving them in the discovered-accounts list. The identities here
-// are the ones the samples actually name — note HDFC 4125 is a *bank* account,
-// which is what the alerts say it is.
-func seedAccounts(t *testing.T, conn *sql.DB) {
-	t.Helper()
-	accounts := []struct {
-		name, bank, kind, number string
-	}{
-		{"HDFC Bank •• 4125", "HDFC", "bank", "XXXXXXXX4125"},
-		{"Axis Bank •• 5792", "Axis", "credit_card", "XXXXXXXX5792"},
-		{"ICICI Bank •• 7001", "ICICI", "credit_card", "XXXXXXXX7001"},
-		{"BOBCARD •• 3109", "BOBCARD", "credit_card", "XXXXXXXX3109"},
-		// The Diners statement names no digits, so it matches on
-		// (institution, kind) with an empty number.
-		{"HDFC Bank - Diners Privilege Credit Card", "HDFC", "credit_card", ""},
+func domainOfAddress(from string) string {
+	if at := strings.LastIndex(from, "@"); at != -1 {
+		return strings.ToLower(from[at+1:])
 	}
-	for _, a := range accounts {
-		if _, err := conn.Exec(`
-			INSERT INTO finance_accounts (name, bank, account_type, account_number, currency, source)
-			VALUES (?, ?, ?, ?, 'INR', 'manual')`, a.name, a.bank, a.kind, a.number); err != nil {
-			t.Fatalf("seed account %s: %v", a.name, err)
-		}
-	}
-}
-
-func newFetcher(samples []sample) *fakeFetcher {
-	byUID := make(map[uint32][]byte, len(samples))
-	for _, s := range samples {
-		byUID[s.uid] = s.raw
-	}
-	return &fakeFetcher{byUID: byUID}
+	return ""
 }
 
 func openDB(t *testing.T) *sql.DB {
@@ -171,720 +83,564 @@ func openDB(t *testing.T) *sql.DB {
 	return conn
 }
 
-// TestIngestFromIndex is the equivalence check for the pipeline merge: reading
-// finance mail out of the shared index must produce exactly what the old
-// dedicated IMAP client produced when it searched the same four sender domains.
-func TestIngestFromIndex(t *testing.T) {
-	samples := loadSamples(t)
-	conn := openDB(t)
-	accountID := seedIndex(t, conn, samples)
-	seedAccounts(t, conn)
-	fetcher := newFetcher(samples)
-
-	result, err := Run(context.Background(), conn, fetcher, accountID, "INBOX")
+// seedIndex writes the mail_accounts + messages rows that a sync pass would
+// have produced for these messages, without any Money-side rows.
+func seedIndex(t *testing.T, conn *sql.DB, messages []message) int64 {
+	t.Helper()
+	res, err := conn.Exec(`
+		INSERT INTO mail_accounts (label, imap_host, imap_port, username, encrypted_password)
+		VALUES ('Test', 'imap.example.com', 993, 'test@example.com', 'x')`)
 	if err != nil {
-		t.Fatalf("ingest: %v", err)
+		t.Fatalf("seed mail account: %v", err)
 	}
-	t.Logf("result: %+v", *result)
+	accountID, _ := res.LastInsertId()
 
-	// Counts are deliberately not hardcoded. statements/ is a working folder
-	// that real examples get dropped into as new issuers turn up, and a test
-	// that has to be hand-edited every time one arrives is a test that gets
-	// deleted rather than fixed. What follows are the properties that must
-	// hold for any set of samples.
-
-	if result.Scanned == 0 {
-		t.Fatal("nothing was scanned; the samples are all from known institutions")
+	for _, m := range messages {
+		if _, err := conn.Exec(`
+			INSERT INTO messages (account_id, folder, uid, rfc_message_id, subject, from_email, from_domain, date)
+			VALUES (?, 'INBOX', ?, ?, ?, ?, ?, '2026-08-12T10:00:00+05:30')`,
+			accountID, m.uid, m.rfcID, m.subject, m.from, domainOfAddress(m.from)); err != nil {
+			t.Fatalf("seed message %d: %v", m.uid, err)
+		}
 	}
-
-	// Every scanned message must land in exactly one outcome. A message that
-	// falls through all of them is silently lost, which is the failure mode
-	// this whole package exists to prevent. (Duplicates overlap the buckets by
-	// design — a duplicate still reports what it parsed as — so it is excluded.)
-	bucketed := result.Transactions + result.Bills + result.Balances + result.Trades +
-		result.Unrecognized + result.PendingPDFPassword
-	if bucketed != result.Scanned {
-		t.Errorf("%d messages scanned but %d accounted for (%+v) — some outcome is unreported",
-			result.Scanned, bucketed, *result)
-	}
-
-	// The samples describe real transactions, bills and balances; extracting
-	// none of them means the parsers stopped working even if nothing panicked.
-	if result.Transactions+result.Bills+result.Balances == 0 {
-		t.Error("the sample emails produced nothing at all")
-	}
-
-	// Bodies must only be fetched for messages already picked out of the index.
-	if len(fetcher.requested) != result.Scanned {
-		t.Errorf("fetched %d bodies for %d scanned messages — ingest must not fetch what it didn't select",
-			len(fetcher.requested), result.Scanned)
-	}
-
-	var txnCount, billCount int
-	conn.QueryRow(`SELECT COUNT(*) FROM transactions`).Scan(&txnCount)
-	conn.QueryRow(`SELECT COUNT(*) FROM bills`).Scan(&billCount)
-	if txnCount != result.Transactions {
-		t.Errorf("db has %d transactions, want %d", txnCount, result.Transactions)
-	}
-	if billCount != result.Bills {
-		t.Errorf("db has %d bills, want %d", billCount, result.Bills)
-	}
-
-	// Every link must point back at the index row. This column is what makes
-	// "show me the email behind this transaction" possible at all.
-	var links, linked int
-	conn.QueryRow(`SELECT COUNT(*) FROM message_links`).Scan(&links)
-	conn.QueryRow(`SELECT COUNT(*) FROM message_links WHERE message_id IS NOT NULL`).Scan(&linked)
-	held := result.PendingPDFPassword
-	if want := result.Scanned - result.Duplicates - held; links != want {
-		t.Errorf("message_links has %d rows, want %d (scanned − duplicates − held)", links, want)
-	}
-	if linked != links {
-		t.Errorf("%d of %d links have no message_id — cross-product links would be broken", links-linked, links)
-	}
+	return accountID
 }
 
-// A batch that cannot be fetched must not starve the messages behind it.
-//
-// This is a regression test for a stall that reached real data: a message
-// this pass could not fetch is left unlinked so it can be retried, which
-// means it stays at the front of the UID-ordered queue. When one batch failed
-// the whole pass returned, which meant every later message was skipped again
-// on every subsequent run — mail kept arriving and nothing was ever imported
-// again.
-func TestFailedFetchDoesNotStarveLaterMessages(t *testing.T) {
-	samples := loadSamples(t)
-	if len(samples) < 2 {
-		t.Skip("need at least two samples to have a batch behind the failing one")
+func newFetcher(messages []message) *fakeFetcher {
+	byUID := make(map[uint32][]byte, len(messages))
+	for _, m := range messages {
+		byUID[m.uid] = m.raw
 	}
-	conn := openDB(t)
-	accountID := seedIndex(t, conn, samples)
-	seedAccounts(t, conn)
-
-	fetcher := newFetcher(samples)
-	fetcher.failUID = samples[0].uid // the first batch is unreadable
-
-	// One message per batch, so the failure lands on its own and everything
-	// after it is a separate batch.
-	oldBatch := batchSizeForTest
-	batchSizeForTest = 1
-	defer func() { batchSizeForTest = oldBatch }()
-
-	result, err := Run(context.Background(), conn, fetcher, accountID, "INBOX")
-	if err != nil {
-		t.Fatalf("a failing batch must not fail the pass: %v", err)
-	}
-	if result.Failed == 0 {
-		t.Error("the failure was not reported; a silent stall is how this went unnoticed")
-	}
-	if result.Scanned == 0 {
-		t.Fatal("nothing behind the failing batch was processed — still starved")
-	}
-	if result.Transactions+result.Bills+result.Balances == 0 {
-		t.Error("no mail imported despite readable messages behind the failure")
-	}
-	t.Logf("result with a failing batch: %+v", *result)
+	return &fakeFetcher{byUID: byUID}
 }
 
-// TestIngestIsIdempotent guards the property the old UID cursor used to provide:
-// running twice must not double-import.
-func TestIngestIsIdempotent(t *testing.T) {
-	samples := loadSamples(t)
-	conn := openDB(t)
-	accountID := seedIndex(t, conn, samples)
-	seedAccounts(t, conn)
-	fetcher := newFetcher(samples)
-
-	first, err := Run(context.Background(), conn, fetcher, accountID, "INBOX")
-	if err != nil {
-		t.Fatalf("first pass: %v", err)
-	}
-	var txnAfterFirst int
-	conn.QueryRow(`SELECT COUNT(*) FROM transactions`).Scan(&txnAfterFirst)
-
-	second, err := Run(context.Background(), conn, fetcher, accountID, "INBOX")
-	if err != nil {
-		t.Fatalf("second pass: %v", err)
-	}
-
-	// Anything genuinely pending (a statement with no password yet) is
-	// SUPPOSED to be picked up again — that is the whole point of leaving it
-	// unlinked. Only already-linked messages must not be re-selected.
-	wantRescanned := first.PendingPDFPassword
-	if second.Scanned != wantRescanned {
-		t.Errorf("second pass scanned %d, want %d (only what's still pending) — already-linked "+
-			"messages must not be re-selected", second.Scanned, wantRescanned)
-	}
-	var txnAfterSecond int
-	conn.QueryRow(`SELECT COUNT(*) FROM transactions`).Scan(&txnAfterSecond)
-	if txnAfterSecond != txnAfterFirst {
-		t.Errorf("re-running created duplicates: had %d, now %d", txnAfterFirst, txnAfterSecond)
-	}
-	if first.Transactions == 0 {
-		t.Fatal("first pass extracted nothing; the idempotency check proves nothing")
-	}
-}
-
-// TestClassifierWidensTheNet is the capability the merge exists to unlock: a
-// message from a sender no parser knows still reaches Money, because the AI
-// classifier flagged it as transactional. It lands as 'unrecognized' rather
-// than being silently skipped, which is what makes an unsupported issuer
-// visible instead of invisible.
-func TestClassifierWidensTheNet(t *testing.T) {
-	samples := loadSamples(t)
-	conn := openDB(t)
-	accountID := seedIndex(t, conn, samples)
-	seedAccounts(t, conn)
-	fetcher := newFetcher(samples)
-	// The co-operative bank below is deliberately NOT seeded until the second
-	// half of the test — an unknown issuer must reach Money without an account
-	// existing for it.
-	if _, err := conn.Exec(`
+func addAccount(t *testing.T, conn *sql.DB, name, bank, kind, number string) int64 {
+	t.Helper()
+	res, err := conn.Exec(`
 		INSERT INTO finance_accounts (name, bank, account_type, account_number, currency, source)
-		VALUES ('Tiny Coop •• 8899', '', 'bank', 'XXXXXXXX8899', 'INR', 'manual')`); err != nil {
-		t.Fatalf("seed outsider account: %v", err)
-	}
-
-	// A co-operative bank nobody has heard of, from a domain no registry
-	// entry covers.
-	const outsiderUID = 9001
-	const outsiderBody = "From: alerts@tiny-coop-bank.example\r\n" +
-		"Subject: Debit alert\r\n" +
-		"Message-Id: <outsider@tiny-coop-bank.example>\r\n" +
-		"Content-Type: text/plain; charset=utf-8\r\n\r\n" +
-		"Rs.750.00 is debited from your account ending 8899 on 05-08-26 towards GROCERY MART.\r\n"
-
-	if _, err := conn.Exec(`
-		INSERT INTO messages (account_id, folder, uid, rfc_message_id, subject, from_email, from_domain, date)
-		VALUES (?, 'INBOX', ?, '<outsider@tiny-coop-bank.example>', 'Debit alert',
-		        'alerts@tiny-coop-bank.example', 'tiny-coop-bank.example', '')`,
-		accountID, outsiderUID); err != nil {
-		t.Fatalf("seed outsider message: %v", err)
-	}
-	fetcher.byUID[outsiderUID] = []byte(outsiderBody)
-
-	var msgID int64
-	if err := conn.QueryRow(
-		`SELECT id FROM messages WHERE account_id = ? AND uid = ?`, accountID, outsiderUID,
-	).Scan(&msgID); err != nil {
-		t.Fatalf("locate outsider message: %v", err)
-	}
-
-	// Unclassified, the outsider must not be selected: sender-domain matching
-	// alone has no reason to reach it.
-	baseline, err := Run(context.Background(), conn, fetcher, accountID, "INBOX")
+		VALUES (?, ?, ?, ?, 'INR', 'manual')`, name, bank, kind, number)
 	if err != nil {
-		t.Fatalf("baseline ingest: %v", err)
+		t.Fatalf("seed account %s: %v", name, err)
 	}
-	if baseline.Scanned != len(samples) {
-		t.Fatalf("baseline scanned = %d, want %d — the outsider should not qualify yet",
-			baseline.Scanned, len(samples))
-	}
+	id, _ := res.LastInsertId()
+	return id
+}
 
-	if _, err := conn.Exec(
-		`INSERT INTO classifications (message_id, category, is_transactional) VALUES (?, 'finance', 1)`, msgID,
-	); err != nil {
-		t.Fatalf("classify outsider: %v", err)
-	}
+type mark struct {
+	name  string
+	value string
+}
 
-	result, err := Run(context.Background(), conn, fetcher, accountID, "INBOX")
+func spansFor(t *testing.T, text string, marks []mark) []parserules.Span {
+	t.Helper()
+	var out []parserules.Span
+	for _, m := range marks {
+		at := strings.Index(text, m.value)
+		if at == -1 {
+			t.Fatalf("%s: %q not found in sample", m.name, m.value)
+		}
+		start := utf8.RuneCountInString(text[:at])
+		out = append(out, parserules.Span{Name: m.name, Start: start, End: start + utf8.RuneCountInString(m.value), Sample: m.value})
+	}
+	return out
+}
+
+// defineRule derives a rule from marks on a sample message and stores it, the
+// way the editor does.
+func defineRule(t *testing.T, conn *sql.DB, kind parserules.Kind, issuer, domain string, sample message, marks []mark, mutate func(*parserules.Rule)) *parserules.Rule {
+	t.Helper()
+	text := parserules.SampleText(sample.subject, sample.body)
+	fields, err := parserules.Derive(text, spansFor(t, text, marks))
+	if err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+	r := &parserules.Rule{
+		Name: string(kind) + " rule", Kind: kind, Enabled: true,
+		Issuer: issuer, SenderDomain: domain, AccountType: "bank", Fields: fields,
+		Sample: parserules.Sample{Subject: sample.subject, From: sample.from, Text: text},
+	}
+	if mutate != nil {
+		mutate(r)
+	}
+	if _, err := parserules.Insert(conn, r); err != nil {
+		t.Fatalf("insert rule: %v", err)
+	}
+	return r
+}
+
+const hdfcFrom = "alerts@hdfcbank.net"
+
+func hdfcDebit(uid uint32, amount, payee, ref string) message {
+	return newMessage(uid, hdfcFrom, "You have done a UPI txn. Check details!",
+		"Dear Customer,\nRs."+amount+" is debited from your account ending 4125 towards VPA "+
+			strings.ToLower(payee)+"@ybl ("+payee+") on 12-08-26.\nUPI transaction reference no.: "+ref+".\n"+
+			"If you did not authorize this transaction, click here to modify or unsubscribe from Insta Alerts.")
+}
+
+var hdfcMarks = []mark{
+	{"amount", "1234.00"}, {"account_last4", "4125"}, {"counterparty", "SWIGGY"},
+	{"date", "12-08-26"}, {"reference", "123456789012"},
+}
+
+func count(t *testing.T, conn *sql.DB, query string, args ...interface{}) int {
+	t.Helper()
+	var n int
+	if err := conn.QueryRow(query, args...).Scan(&n); err != nil {
+		t.Fatalf("%s: %v", query, err)
+	}
+	return n
+}
+
+// A rule defined on one alert reads the next: the transaction is written to
+// the account the alert names, and the link records which rule read it.
+func TestRuleReadsTransactionAndStampsRule(t *testing.T) {
+	conn := openDB(t)
+	sample := hdfcDebit(101, "1234.00", "SWIGGY", "123456789012")
+	msg := hdfcDebit(102, "500.00", "ZOMATO", "987654321098")
+	mailbox := seedIndex(t, conn, []message{msg})
+	accountID := addAccount(t, conn, "HDFC Savings", "HDFC", "bank", "XXXXXXXX4125")
+	rule := defineRule(t, conn, parserules.KindTransaction, "HDFC", "hdfcbank.net", sample, hdfcMarks, nil)
+
+	result, err := Run(context.Background(), conn, newFetcher([]message{msg}), mailbox, "INBOX")
 	if err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
-	// Whatever was already pending from the baseline pass (a not-yet-password
-	// statement) legitimately gets re-scanned too — the newly classified
-	// outsider is the ONE NEW arrival, not the only thing scanned.
-	wantScanned := 1 + baseline.PendingPDFPassword
-	if result.Scanned != wantScanned {
-		t.Errorf("scanned = %d, want %d — the newly classified message plus whatever was still pending",
-			result.Scanned, wantScanned)
+	if result.Scanned != 1 || result.Transactions != 1 {
+		t.Fatalf("result = %+v, want 1 scanned, 1 transaction", result)
+	}
+
+	var amount float64
+	var merchant, txnDate, method string
+	var linkedAccount int64
+	if err := conn.QueryRow(`SELECT withdrawal_amt, merchant, txn_date, payment_method, account_id FROM transactions`).
+		Scan(&amount, &merchant, &txnDate, &method, &linkedAccount); err != nil {
+		t.Fatalf("no transaction: %v", err)
+	}
+	if amount != 500 || merchant != "ZOMATO" || txnDate != "2026-08-12" || method != "UPI" || linkedAccount != accountID {
+		t.Errorf("transaction = %.2f %q %s %q account %d", amount, merchant, txnDate, method, linkedAccount)
 	}
 
 	var parsedAs string
-	if err := conn.QueryRow(
-		`SELECT parsed_as FROM message_links WHERE message_id = ?`, msgID,
-	).Scan(&parsedAs); err != nil {
-		t.Fatalf("outsider was not linked at all: %v", err)
+	var ruleID sql.NullInt64
+	conn.QueryRow(`SELECT parsed_as, rule_id FROM message_links`).Scan(&parsedAs, &ruleID)
+	if parsedAs != "transaction" || !ruleID.Valid || ruleID.Int64 != rule.ID {
+		t.Errorf("link = %q rule %v, want transaction by rule %d", parsedAs, ruleID, rule.ID)
 	}
-	// The shared alert reader understands the standard Indian phrasing even
-	// from an issuer nobody wrote a parser for — which is the whole point of
-	// having one.
-	if parsedAs != "transaction" {
-		t.Errorf("outsider parsed_as = %q, want %q", parsedAs, "transaction")
+	if n := count(t, conn, `SELECT match_count FROM email_parser_rules WHERE id = ?`, rule.ID); n != 1 {
+		t.Errorf("match_count = %d, want 1", n)
 	}
+	if n := count(t, conn, `SELECT COUNT(*) FROM finance_accounts`); n != 1 {
+		t.Errorf("accounts = %d; ingest must not create any", n)
+	}
+}
 
-	var narration string
+// Mail from a known institution with no rule stays visible as unrecognized;
+// mail from an unknown sender with no rule is not even fetched.
+func TestNoRuleMeansUnrecognized(t *testing.T) {
+	conn := openDB(t)
+	bank := newMessage(201, "alerts@icicibank.com", "Transaction alert", "INR 100 spent on card XX7001")
+	stranger := newMessage(202, "news@somewhere.example", "Hello", "Nothing financial")
+	mailbox := seedIndex(t, conn, []message{bank, stranger})
+	fetcher := newFetcher([]message{bank, stranger})
+
+	result, err := Run(context.Background(), conn, fetcher, mailbox, "INBOX")
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if result.Scanned != 1 || result.Unrecognized != 1 {
+		t.Errorf("result = %+v, want 1 scanned, 1 unrecognized", result)
+	}
+	if len(fetcher.requested) != 1 || fetcher.requested[0] != 201 {
+		t.Errorf("fetched %v, want only the bank's message", fetcher.requested)
+	}
+	if n := count(t, conn, `SELECT COUNT(*) FROM message_links WHERE parsed_as = 'unrecognized' AND uid = 201`); n != 1 {
+		t.Errorf("unrecognized links = %d, want 1", n)
+	}
+}
+
+// A rule can teach a sender the registry never heard of.
+func TestRuleSenderWidensCandidates(t *testing.T) {
+	conn := openDB(t)
+	sample := newMessage(301, "alerts@smallbank.example", "Debit alert",
+		"Rs.250.00 debited from A/c XX9001 to MERCHANT ONE on 12-08-26.")
+	msg := newMessage(302, "alerts@smallbank.example", "Debit alert",
+		"Rs.75.00 debited from A/c XX9001 to MERCHANT TWO on 13-08-26.")
+	mailbox := seedIndex(t, conn, []message{msg})
+	addAccount(t, conn, "Small bank", "SmallBank", "bank", "9001")
+	defineRule(t, conn, parserules.KindTransaction, "SmallBank", "smallbank.example", sample, []mark{
+		{"amount", "250.00"}, {"account_last4", "XX9001"}, {"counterparty", "MERCHANT ONE"}, {"date", "12-08-26"},
+	}, nil)
+
+	result, err := Run(context.Background(), conn, newFetcher([]message{msg}), mailbox, "INBOX")
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if result.Transactions != 1 {
+		t.Fatalf("result = %+v, want 1 transaction", result)
+	}
+	var merchant string
 	var amount float64
-	if err := conn.QueryRow(`
-		SELECT t.narration, t.withdrawal_amt
-		FROM transactions t JOIN message_links l ON l.transaction_id = t.id
-		WHERE l.message_id = ?`, msgID).Scan(&narration, &amount); err != nil {
-		t.Fatalf("outsider produced no transaction: %v", err)
-	}
-	if amount != 750 {
-		t.Errorf("amount = %.2f, want 750.00", amount)
+	conn.QueryRow(`SELECT merchant, withdrawal_amt FROM transactions`).Scan(&merchant, &amount)
+	if merchant != "MERCHANT TWO" || amount != 75 {
+		t.Errorf("transaction = %q %.2f", merchant, amount)
 	}
 }
 
-// TestPersistRealSampleEmails exercises the parse -> persist path directly over
-// every sample, independent of index selection, so a parser regression is
-// distinguishable from a selection regression.
-func TestPersistRealSampleEmails(t *testing.T) {
-	samples := loadSamples(t)
+// A message naming an account nobody registered is held — with what it said
+// about the account — and imported once that account exists. No account is
+// ever created by ingest.
+func TestMissingAccountIsHeldThenImported(t *testing.T) {
 	conn := openDB(t)
-	seedAccounts(t, conn)
+	sample := hdfcDebit(401, "1234.00", "SWIGGY", "123456789012")
+	msg := hdfcDebit(402, "500.00", "ZOMATO", "987654321098")
+	mailbox := seedIndex(t, conn, []message{msg})
+	defineRule(t, conn, parserules.KindTransaction, "HDFC", "hdfcbank.net", sample, hdfcMarks, nil)
 
-	counts := map[string]int{}
-	for _, s := range samples {
-		parsed, err := emailparse.ParseEML(s.raw)
-		if err != nil {
-			t.Fatalf("parse %s: %v", s.name, err)
-		}
-		inst := emailparse.InstitutionForSender(parsed.From)
-		outcome := Persist(conn, inst, parsed)
-		counts[outcome.ParsedAs]++
-		t.Logf("%s -> issuer=%s kind=%s", s.name, emailparse.IssuerForSender(parsed.From), outcome.ParsedAs)
-	}
-
-	t.Logf("counts: %+v", counts)
-	if counts["transaction"] == 0 {
-		t.Error("expected at least one transaction from the sample emails")
-	}
-
-	// The 5 seeded accounts must survive untouched: still 'manual', still the
-	// type the user chose. The HDFC savings account staying 'bank' is the
-	// specific regression that matters — a card-shaped HDFC alert naming the
-	// same digits used to flip it to credit_card, which reports a salary
-	// account's balance as debt. Samples naming an account outside the seeded
-	// five are expected to auto-create one (source='email') rather than being
-	// held — see TestUnknownAccountAutoCreatesItself.
-	rows, err := conn.Query(`SELECT name, bank, account_type, source FROM finance_accounts ORDER BY id`)
+	result, err := Run(context.Background(), conn, newFetcher([]message{msg}), mailbox, "INBOX")
 	if err != nil {
-		t.Fatalf("listing accounts: %v", err)
+		t.Fatalf("ingest: %v", err)
 	}
-	defer rows.Close()
-	seeded, invented := 0, 0
-	for rows.Next() {
-		var name, bank, kind, source string
-		if err := rows.Scan(&name, &bank, &kind, &source); err != nil {
-			t.Fatalf("scanning account: %v", err)
-		}
-		t.Logf("account: %-42s bank=%-8s type=%-12s source=%s", name, bank, kind, source)
-		if source == "manual" {
-			seeded++
-		} else {
-			invented++
-		}
+	if result.PendingAccount != 1 || result.Transactions != 0 {
+		t.Fatalf("result = %+v, want 1 pending", result)
 	}
-	if seeded != 5 {
-		t.Errorf("%d of the 5 seeded accounts still read source='manual', want 5 — ingest must "+
-			"never rewrite an account the user chose", seeded)
+	if n := count(t, conn, `SELECT COUNT(*) FROM finance_accounts`); n != 0 {
+		t.Fatalf("ingest created %d accounts", n)
 	}
-	t.Logf("%d accounts auto-created from mail naming an account outside the seeded five", invented)
+	var issuer, name, last4, kind string
+	if err := conn.QueryRow(`SELECT pending_issuer, pending_name, pending_last4, pending_kind
+		FROM message_links WHERE parsed_as = 'pending_account'`).Scan(&issuer, &name, &last4, &kind); err != nil {
+		t.Fatalf("no pending link: %v", err)
+	}
+	if issuer != "HDFC" || name != "HDFC Bank" || last4 != "4125" || kind != "bank" {
+		t.Errorf("pending hint = %q %q %q %q", issuer, name, last4, kind)
+	}
 
-	var hdfcKind string
-	conn.QueryRow(`SELECT account_type FROM finance_accounts WHERE account_number = 'XXXXXXXX4125'`).
-		Scan(&hdfcKind)
-	if hdfcKind != "bank" {
-		t.Errorf("HDFC 4125 account_type = %q, want \"bank\" — mail must not rewrite a chosen type", hdfcKind)
+	// A second pass changes nothing: the message is linked, so it is not a
+	// candidate, and nothing is fetched.
+	fetcher := newFetcher([]message{msg})
+	if _, err := Run(context.Background(), conn, fetcher, mailbox, "INBOX"); err != nil {
+		t.Fatal(err)
+	}
+	if fetcher.calls != 0 {
+		t.Errorf("held message was fetched again")
+	}
+
+	// The user adds the account. Releasing the held mail makes it a candidate
+	// again, and the next pass imports it.
+	addAccount(t, conn, "HDFC Savings", "HDFC", "bank", "4125")
+	released, err := ClearPendingFor(conn, "HDFC", "4125")
+	if err != nil || released != 1 {
+		t.Fatalf("released %d (%v), want 1", released, err)
+	}
+	result, err = Run(context.Background(), conn, newFetcher([]message{msg}), mailbox, "INBOX")
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if result.Transactions != 1 {
+		t.Errorf("result after adding the account = %+v, want 1 transaction", result)
+	}
+	if n := count(t, conn, `SELECT COUNT(*) FROM message_links WHERE parsed_as = 'pending_account'`); n != 0 {
+		t.Errorf("%d pending links remain", n)
 	}
 }
 
-// The behaviour the whole change exists for: an alert naming an account
-// nobody registered auto-creates one from the alert's own evidence, so a
-// mailbox with nothing configured still turns into a populated ledger.
-func TestUnknownAccountAutoCreatesItself(t *testing.T) {
-	samples := loadSamples(t)
+// A digit-less hint (a wallet) is released on the institution, however the
+// user typed it.
+func TestClearPendingForMatchesInstitutionName(t *testing.T) {
 	conn := openDB(t)
-	accountID := seedIndex(t, conn, samples)
-	fetcher := newFetcher(samples)
+	mailbox := seedIndex(t, conn, nil)
+	conn.Exec(`INSERT INTO message_links (mail_account_id, rfc_message_id, parsed_as, pending_issuer, pending_name)
+		VALUES (?, '<w1>', 'pending_account', 'AmazonPay', 'Amazon Pay')`, mailbox)
 
-	// No finance accounts at all — the state right after a reset.
-	first, err := Run(context.Background(), conn, fetcher, accountID, "INBOX")
-	if err != nil {
-		t.Fatalf("first pass: %v", err)
+	if n, _ := ClearPendingFor(conn, "Some other bank", ""); n != 0 {
+		t.Errorf("released %d for an unrelated bank", n)
 	}
-	if first.Transactions == 0 && first.Bills == 0 && first.Balances == 0 {
-		t.Fatal("nothing was imported with no accounts registered — auto-creation did not run")
+	if n, _ := ClearPendingFor(conn, "amazon pay", ""); n != 1 {
+		t.Errorf("released %d for the display name, want 1", n)
 	}
-
-	var accounts int
-	conn.QueryRow(`SELECT COUNT(*) FROM finance_accounts`).Scan(&accounts)
-	if accounts == 0 {
-		t.Error("ingest created 0 accounts — the samples do name accounts")
-	}
-	var nonEmail int
-	conn.QueryRow(`SELECT COUNT(*) FROM finance_accounts WHERE source != 'email'`).Scan(&nonEmail)
-	if nonEmail != 0 {
-		t.Errorf("%d auto-created accounts have source != 'email'", nonEmail)
-	}
-
-	// Re-running must not double-import against the accounts it just created.
-	second, err := Run(context.Background(), conn, fetcher, accountID, "INBOX")
-	if err != nil {
-		t.Fatalf("second pass: %v", err)
-	}
-	if second.Scanned != 0 {
-		t.Errorf("second pass scanned %d already-linked messages, want 0", second.Scanned)
-	}
-	var accountsAfter int
-	conn.QueryRow(`SELECT COUNT(*) FROM finance_accounts`).Scan(&accountsAfter)
-	if accountsAfter != accounts {
-		t.Errorf("second pass changed account count from %d to %d — must not create duplicates",
-			accounts, accountsAfter)
-	}
-	t.Logf("auto-created then stable: %+v", *first)
 }
 
-// The HDFC balance-update sample states a balance the bank vouches for. It has
-// to end up on the account, or an alert-only account reads as empty.
-func TestPersistRecordsReportedBalance(t *testing.T) {
+func TestRescanStuckClearsPending(t *testing.T) {
 	conn := openDB(t)
-	seedAccounts(t, conn)
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "statements",
-		"HDFC email balance update.eml"))
-	if err != nil {
-		t.Skipf("sample not available: %v", err)
-	}
-	parsed, err := emailparse.ParseEML(raw)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
+	mailbox := seedIndex(t, conn, nil)
+	conn.Exec(`INSERT INTO message_links (mail_account_id, rfc_message_id, parsed_as) VALUES (?, '<a>', 'pending_account')`, mailbox)
+	conn.Exec(`INSERT INTO message_links (mail_account_id, rfc_message_id, parsed_as) VALUES (?, '<b>', 'unrecognized')`, mailbox)
+	conn.Exec(`INSERT INTO message_links (mail_account_id, rfc_message_id, parsed_as) VALUES (?, '<c>', 'balance')`, mailbox)
 
-	outcome := Persist(conn, emailparse.InstitutionForSender(parsed.From), parsed)
-	if outcome.ParsedAs != "balance" {
-		t.Fatalf("parsed as %q, want %q", outcome.ParsedAs, "balance")
+	cleared, err := RescanStuck(conn, mailbox)
+	if err != nil || cleared != 2 {
+		t.Fatalf("cleared %d (%v), want 2", cleared, err)
 	}
-	if outcome.AccountID == 0 {
-		t.Fatal("no account was resolved for the balance alert")
-	}
-
-	var kind string
-	var balance float64
-	if err := conn.QueryRow(
-		`SELECT account_type, current_balance FROM finance_accounts WHERE id = ?`, outcome.AccountID,
-	).Scan(&kind, &balance); err != nil {
-		t.Fatalf("reading account: %v", err)
-	}
-	if kind != "bank" {
-		t.Errorf("account_type = %q, want %q — a savings balance alert is not a card", kind, "bank")
-	}
-	const want = 208870.09
-	if balance != want {
-		t.Errorf("current_balance = %.2f, want %.2f", balance, want)
+	if n := count(t, conn, `SELECT COUNT(*) FROM message_links`); n != 1 {
+		t.Errorf("%d links remain, want the balance link only", n)
 	}
 }
 
-// A broker order confirmation becomes a holding, not a bank transaction.
-//
-// "BUY order ... for $245.73 is successful" carries an amount and a direction
-// word, so the generic alert reader would book it as a $245.73 expense against
-// a bank account — money that never left any tracked account, and a US stock
-// that never appears in the portfolio.
-func TestBrokerOrderBecomesAHoldingNotATransaction(t *testing.T) {
+// ClearForRule releases only the unread mail from the rule's own sender.
+func TestClearForRuleReleasesThatSendersMail(t *testing.T) {
 	conn := openDB(t)
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "statements",
-		"BUY order of Take-Two Interactive Software Inc. for $245.73 is successful.eml"))
-	if err != nil {
-		t.Skipf("sample not available: %v", err)
-	}
-	parsed, err := emailparse.ParseEML(raw)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
+	mailbox := seedIndex(t, conn, nil)
+	conn.Exec(`INSERT INTO message_links (mail_account_id, rfc_message_id, parsed_as, sender) VALUES (?, '<a>', 'unrecognized', 'alerts@hdfcbank.net')`, mailbox)
+	conn.Exec(`INSERT INTO message_links (mail_account_id, rfc_message_id, parsed_as, sender) VALUES (?, '<b>', 'unrecognized', 'alerts@axisbank.com')`, mailbox)
+	conn.Exec(`INSERT INTO message_links (mail_account_id, rfc_message_id, parsed_as, sender) VALUES (?, '<c>', 'transaction', 'alerts@hdfcbank.net')`, mailbox)
 
-	outcome := Persist(conn, emailparse.InstitutionForSender(parsed.From), parsed)
-	if outcome.ParsedAs != "trade" {
-		t.Fatalf("parsed as %q, want %q", outcome.ParsedAs, "trade")
-	}
-
-	// Nothing may have reached the ledger.
-	var txns int
-	conn.QueryRow(`SELECT COUNT(*) FROM transactions`).Scan(&txns)
-	if txns != 0 {
-		t.Errorf("%d bank transactions written for a securities order, want 0", txns)
-	}
-
-	var kind, currency, name string
-	var units, invested, value float64
-	err = conn.QueryRow(`SELECT kind, currency, name, COALESCE(units,0), invested_amount, current_value
-		FROM investments WHERE id = ?`, outcome.InvestmentID).
-		Scan(&kind, &currency, &name, &units, &invested, &value)
-	if err != nil {
-		t.Fatalf("reading holding: %v", err)
-	}
-	if kind != "us_stock" {
-		t.Errorf("kind = %q, want us_stock", kind)
-	}
-	if currency != "USD" {
-		t.Errorf("currency = %q, want USD", currency)
-	}
-	if name != "Take-Two Interactive Software Inc." {
-		t.Errorf("name = %q", name)
-	}
-	if units != 1 || invested != 245.73 {
-		t.Errorf("units=%v invested=%v, want 1 and 245.73", units, invested)
-	}
-	// Unpriced, so the position is carried at cost rather than at zero.
-	if value != 245.73 {
-		t.Errorf("current value = %v, want it to fall back to cost", value)
-	}
-
-	// Re-reading the same mail must not buy the stock again.
-	if second := Persist(conn, emailparse.InstitutionForSender(parsed.From), parsed); second.ParsedAs != "trade" {
-		t.Fatalf("second pass parsed as %q", second.ParsedAs)
-	}
-	var trades int
-	conn.QueryRow(`SELECT COUNT(*) FROM investment_trades`).Scan(&trades)
-	conn.QueryRow(`SELECT COALESCE(units,0) FROM investments WHERE id = ?`, outcome.InvestmentID).Scan(&units)
-	if trades != 1 || units != 1 {
-		t.Errorf("re-reading produced %d trades and %v units, want 1 and 1", trades, units)
+	n, err := ClearForRule(conn, mailbox, &parserules.Rule{SenderDomain: "hdfcbank.net"})
+	if err != nil || n != 1 {
+		t.Fatalf("cleared %d (%v), want 1", n, err)
 	}
 }
 
-// zerodhaSample loads one real Zerodha .eml, skipping the test when it isn't
-// present — these are dropped into statements/ by hand and aren't always there.
-func zerodhaSample(t *testing.T, name string) *emailparse.Email {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "statements", name))
-	if err != nil {
-		t.Skipf("sample not available: %v", err)
-	}
-	parsed, err := emailparse.ParseEML(raw)
-	if err != nil {
-		t.Fatalf("parse %s: %v", name, err)
-	}
-	return parsed
-}
-
-// Zerodha's own notice that money moved into or out of the trading account
-// balance ("Payment success", "Settlement of unused funds") must produce
-// nothing — the real movement is the bank-side transaction, which this
-// email's own wording ("deposited", "account 4125") would otherwise be
-// misread as a second, phantom credit to an account that doesn't exist under
-// Zerodha's name.
-func TestZerodhaFundingNoticesProduceNoTransaction(t *testing.T) {
-	for _, name := range []string{"Payment success.eml", "Settlement of unused funds.eml"} {
-		t.Run(name, func(t *testing.T) {
-			conn := openDB(t)
-			parsed := zerodhaSample(t, name)
-			outcome := Persist(conn, emailparse.InstitutionForSender(parsed.From), parsed)
-			if outcome.ParsedAs != "unrecognized" {
-				t.Errorf("parsed as %q, want unrecognized", outcome.ParsedAs)
-			}
-			var txns int
-			conn.QueryRow(`SELECT COUNT(*) FROM transactions`).Scan(&txns)
-			if txns != 0 {
-				t.Errorf("%d transactions created from a Zerodha funding notice, want 0", txns)
-			}
-		})
-	}
-}
-
-// A Coin allotment report needs no password (it's plain text) and becomes a
-// mutual fund holding, matched by folio number across re-imports.
-func TestCoinAllotmentBecomesAMutualFundHolding(t *testing.T) {
+// The same alert delivered twice (two Message-IDs) is one transaction, and
+// both messages link to it.
+func TestDuplicateAlertLinksToTheExistingTransaction(t *testing.T) {
 	conn := openDB(t)
-	parsed := zerodhaSample(t, "Coin by Zerodha - Allotment report - 10-08-2026.eml")
+	sample := hdfcDebit(501, "1234.00", "SWIGGY", "123456789012")
+	first := hdfcDebit(502, "500.00", "ZOMATO", "987654321098")
+	second := hdfcDebit(503, "500.00", "ZOMATO", "987654321098")
+	mailbox := seedIndex(t, conn, []message{first, second})
+	addAccount(t, conn, "HDFC Savings", "HDFC", "bank", "XXXXXXXX4125")
+	defineRule(t, conn, parserules.KindTransaction, "HDFC", "hdfcbank.net", sample, hdfcMarks, nil)
 
-	outcome := Persist(conn, emailparse.InstitutionForSender(parsed.From), parsed)
-	if outcome.ParsedAs != "trade" {
-		t.Fatalf("parsed as %q, want trade", outcome.ParsedAs)
+	if _, err := Run(context.Background(), conn, newFetcher([]message{first, second}), mailbox, "INBOX"); err != nil {
+		t.Fatal(err)
 	}
-
-	var kind, identifier string
-	var units, invested float64
-	if err := conn.QueryRow(`SELECT kind, identifier, COALESCE(units,0), invested_amount
-		FROM investments WHERE id = ?`, outcome.InvestmentID).
-		Scan(&kind, &identifier, &units, &invested); err != nil {
-		t.Fatalf("reading holding: %v", err)
+	if n := count(t, conn, `SELECT COUNT(*) FROM transactions`); n != 1 {
+		t.Errorf("transactions = %d, want 1", n)
 	}
-	if kind != "mutual_fund" {
-		t.Errorf("kind = %q, want mutual_fund", kind)
-	}
-	if identifier != "910102601403" {
-		t.Errorf("identifier (folio) = %q, want 910102601403", identifier)
-	}
-	if units != 84.547 || invested != 9999.5 {
-		t.Errorf("units=%v invested=%v, want 84.547 and 9999.5", units, invested)
-	}
-
-	// Re-reading the same report must not buy the fund again.
-	second := Persist(conn, emailparse.InstitutionForSender(parsed.From), parsed)
-	if second.ParsedAs != "trade" {
-		t.Fatalf("second pass parsed as %q", second.ParsedAs)
-	}
-	var holdings int
-	conn.QueryRow(`SELECT COUNT(*) FROM investments`).Scan(&holdings)
-	conn.QueryRow(`SELECT COALESCE(units,0) FROM investments WHERE id = ?`, outcome.InvestmentID).Scan(&units)
-	if holdings != 1 || units != 84.547 {
-		t.Errorf("re-reading produced %d holdings and %v units, want 1 and 84.547", holdings, units)
+	if n := count(t, conn, `SELECT COUNT(*) FROM message_links WHERE parsed_as = 'transaction' AND transaction_id IS NOT NULL`); n != 2 {
+		t.Errorf("linked messages = %d, want both", n)
 	}
 }
 
-// A password-protected contract note is held pending — not discarded — until
-// a password is configured, then becomes an equity trade once one is.
-func TestZerodhaContractNoteWaitsForPasswordThenBecomesATrade(t *testing.T) {
+func TestArchivedAccountIsNotMatched(t *testing.T) {
 	conn := openDB(t)
-	parsed := zerodhaSample(t, "Combined Equity Contract Note for YPQ985 - August 14, 2026.eml")
-	if len(parsed.PDFAttachments) == 0 {
-		t.Skip("sample has no PDF attachment")
-	}
-	inst := emailparse.InstitutionForSender(parsed.From)
+	sample := hdfcDebit(601, "1234.00", "SWIGGY", "123456789012")
+	msg := hdfcDebit(602, "500.00", "ZOMATO", "987654321098")
+	mailbox := seedIndex(t, conn, []message{msg})
+	id := addAccount(t, conn, "Old HDFC", "HDFC", "bank", "XXXXXXXX4125")
+	conn.Exec(`UPDATE finance_accounts SET archived_at = '2026-01-01T00:00:00Z' WHERE id = ?`, id)
+	defineRule(t, conn, parserules.KindTransaction, "HDFC", "hdfcbank.net", sample, hdfcMarks, nil)
 
-	// No password configured yet: held, not lost.
-	outcome := PersistWithPasswords(conn, inst, parsed, nil)
-	if outcome.ParsedAs != pendingPDFPasswordOutcome {
-		t.Fatalf("parsed as %q with no password configured, want %q", outcome.ParsedAs, pendingPDFPasswordOutcome)
+	result, err := Run(context.Background(), conn, newFetcher([]message{msg}), mailbox, "INBOX")
+	if err != nil {
+		t.Fatal(err)
 	}
-	var txns, holdings int
-	conn.QueryRow(`SELECT COUNT(*) FROM transactions`).Scan(&txns)
-	conn.QueryRow(`SELECT COUNT(*) FROM investments`).Scan(&holdings)
-	if txns != 0 || holdings != 0 {
-		t.Errorf("something was written while pending: txns=%d holdings=%d", txns, holdings)
-	}
-
-	// A wrong password is held the same way, not treated as final failure.
-	wrong := PersistWithPasswords(conn, inst, parsed, func(string) (string, bool) { return "WRONGPASS", true })
-	if wrong.ParsedAs != pendingPDFPasswordOutcome {
-		t.Errorf("parsed as %q with a wrong password, want %q (retryable)", wrong.ParsedAs, pendingPDFPasswordOutcome)
-	}
-
-	// The real password: PAN in capital letters, as Zerodha's own mail states.
-	lookup := func(issuer string) (string, bool) {
-		if issuer == "Zerodha" {
-			return "BKIPV2526H", true
-		}
-		return "", false
-	}
-	outcome = PersistWithPasswords(conn, inst, parsed, lookup)
-	if outcome.ParsedAs != "trade" {
-		t.Fatalf("parsed as %q with the correct password, want trade", outcome.ParsedAs)
-	}
-
-	var kind, identifier string
-	var units, invested float64
-	if err := conn.QueryRow(`SELECT kind, identifier, COALESCE(units,0), invested_amount
-		FROM investments WHERE id = ?`, outcome.InvestmentID).
-		Scan(&kind, &identifier, &units, &invested); err != nil {
-		t.Fatalf("reading holding: %v", err)
-	}
-	if kind != "stock" || identifier != "INE155A01022" {
-		t.Errorf("kind=%q identifier=%q, want stock / INE155A01022", kind, identifier)
-	}
-	if units != 6 || invested != 1992 {
-		t.Errorf("units=%v invested=%v, want 6 and 1992", units, invested)
-	}
-
-	// Re-processing with the password on file must not double the position.
-	again := PersistWithPasswords(conn, inst, parsed, lookup)
-	if again.ParsedAs != "trade" {
-		t.Fatalf("re-parse got %q", again.ParsedAs)
-	}
-	conn.QueryRow(`SELECT COALESCE(units,0) FROM investments WHERE id = ?`, outcome.InvestmentID).Scan(&units)
-	if units != 6 {
-		t.Errorf("units after re-processing = %v, want still 6", units)
+	if result.PendingAccount != 1 || result.Transactions != 0 {
+		t.Errorf("result = %+v, want the message held", result)
 	}
 }
 
-// A monthly demat holding statement values every listed instrument at once —
-// it seeds a holding that has no trade history, and moves the price of one
-// that already does, without inventing a purchase that never happened.
-func TestZerodhaHoldingStatementSeedsAndPricesPositions(t *testing.T) {
+func TestBalanceRuleRecordsSnapshot(t *testing.T) {
 	conn := openDB(t)
-	parsed := zerodhaSample(t, "Zerodha Broking Ltd_ Monthly Demat Transaction with Holding Statement for YPQ985 - June - 2026.eml")
-	if len(parsed.PDFAttachments) == 0 {
-		t.Skip("sample has no PDF attachment")
-	}
-	inst := emailparse.InstitutionForSender(parsed.From)
-	lookup := func(string) (string, bool) { return "BKIPV2526H", true }
+	sample := newMessage(701, hdfcFrom, "Balance update",
+		"The available balance in your account ending XX4125 is Rs. INR 2,08,870.09 as of 12-AUG-26.")
+	msg := newMessage(702, hdfcFrom, "Balance update",
+		"The available balance in your account ending XX4125 is Rs. INR 1,500.00 as of 20-AUG-26.")
+	mailbox := seedIndex(t, conn, []message{msg})
+	accountID := addAccount(t, conn, "HDFC Savings", "HDFC", "bank", "XXXXXXXX4125")
+	defineRule(t, conn, parserules.KindBalance, "HDFC", "hdfcbank.net", sample, []mark{
+		{"balance", "2,08,870.09"}, {"account_last4", "XX4125"}, {"as_of", "12-AUG-26"},
+	}, nil)
 
-	outcome := PersistWithPasswords(conn, inst, parsed, lookup)
-	if outcome.ParsedAs != "trade" {
-		t.Fatalf("parsed as %q, want trade", outcome.ParsedAs)
+	result, err := Run(context.Background(), conn, newFetcher([]message{msg}), mailbox, "INBOX")
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	var holdings int
-	conn.QueryRow(`SELECT COUNT(*) FROM investments`).Scan(&holdings)
-	if holdings == 0 {
-		t.Fatal("no holdings created from the statement")
+	if result.Balances != 1 {
+		t.Fatalf("result = %+v, want 1 balance", result)
 	}
-
-	// HDFC Bank equity: no trade history anywhere, so its 20 units at ₹798.40
-	// must come from the seed — a real position, not an empty row.
-	var units, invested, value, price float64
-	var notes string
-	if err := conn.QueryRow(`SELECT COALESCE(units,0), invested_amount, current_value,
-		COALESCE(last_price,0), notes FROM investments WHERE identifier = 'INE040A01034'`).
-		Scan(&units, &invested, &value, &price, &notes); err != nil {
-		t.Fatalf("HDFC Bank holding not found: %v", err)
-	}
-	if units != 20 {
-		t.Errorf("units = %v, want 20", units)
-	}
-	if price != 798.4 {
-		t.Errorf("price = %v, want 798.4", price)
-	}
-	if notes == "" {
-		t.Error("no note explaining the estimated cost basis")
-	}
-
-	// A mutual fund (INF-prefixed ISIN) held in demat form must be routed to
-	// the mutual fund tab, not lumped in with equities.
-	var mfKind string
-	if err := conn.QueryRow(`SELECT kind FROM investments WHERE identifier = 'INF179K01UT0'`).Scan(&mfKind); err != nil {
-		t.Fatalf("HDFC FCF fund holding not found: %v", err)
-	}
-	if mfKind != "mutual_fund" {
-		t.Errorf("kind = %q for an INF-prefixed ISIN, want mutual_fund", mfKind)
-	}
-
-	// Re-processing the same statement must not seed a second opening trade —
-	// the whole reason RecordHoldingSnapshot keys the seed on the instrument,
-	// not the statement period.
-	PersistWithPasswords(conn, inst, parsed, lookup)
-	var trades int
-	conn.QueryRow(`SELECT COUNT(*) FROM investment_trades WHERE investment_id =
-		(SELECT id FROM investments WHERE identifier = 'INE040A01034')`).Scan(&trades)
-	if trades != 1 {
-		t.Errorf("%d seed trades for one instrument after two statements, want 1", trades)
+	var asOf string
+	var balance, current float64
+	conn.QueryRow(`SELECT as_of, balance FROM balance_snapshots WHERE account_id = ?`, accountID).Scan(&asOf, &balance)
+	conn.QueryRow(`SELECT current_balance FROM finance_accounts WHERE id = ?`, accountID).Scan(&current)
+	if asOf != "2026-08-20" || balance != 1500 || current != 1500 {
+		t.Errorf("snapshot %s %.2f, current %.2f", asOf, balance, current)
 	}
 }
 
-// The bank-side leg of funding Zerodha — an ordinary UPI debit — must be
-// reclassified as an investment transfer, not left counted as spending. This
-// is the deterministic counterpart to the funding-notice short-circuit above:
-// the real money movement lives here, on the bank's own transaction.
-func TestBankTransferFundingZerodhaIsReclassifiedAsInvestmentTransfer(t *testing.T) {
+func TestBillRuleUpsertsStatement(t *testing.T) {
 	conn := openDB(t)
-	if _, err := conn.Exec(`INSERT INTO finance_accounts (id, name, bank, account_type, account_number, source)
-		VALUES (1, 'HDFC Bank •• 4125', 'HDFC', 'bank', 'XXXXXXXX4125', 'manual')`); err != nil {
+	from := "statements@icicibank.com"
+	body := func(total string) string {
+		return "Dear Customer,\nYour credit card ending in 7001 statement is ready.\nTotal Amount Due:\n" + total +
+			"\nMinimum Amount Due: INR 1,234.00\nPayment due\nby 05 August, 2026\nThank you"
+	}
+	subject := "Your ICICI Bank Credit Card Statement for the period 12-Jul-2026 to 11-Aug-2026"
+	sample := newMessage(801, from, subject, body("INR 12,345.00"))
+	first := newMessage(802, from, subject, body("INR 12,345.00"))
+	resend := newMessage(803, from, subject, body("INR 12,345.00"))
+	mailbox := seedIndex(t, conn, []message{first, resend})
+	// Unrelated links push message_links rowids past the bill's, so a resend linked
+	// through a stale last_insert_rowid would point at no bill at all.
+	for i := 0; i < 3; i++ {
+		conn.Exec(`INSERT INTO message_links (mail_account_id, rfc_message_id, parsed_as) VALUES (?, ?, 'unrecognized')`,
+			mailbox, fmt.Sprintf("<other-%d>", i))
+	}
+	card := addAccount(t, conn, "ICICI card", "ICICI", "credit_card", "XXXXXXXX7001")
+	defineRule(t, conn, parserules.KindBill, "ICICI", "icicibank.com", sample, []mark{
+		{"card_last4", "7001"}, {"total_due", "12,345.00"}, {"minimum_due", "1,234.00"},
+		{"due_date", "05 August, 2026"}, {"statement_period", "12-Jul-2026 to 11-Aug-2026"},
+	}, func(r *parserules.Rule) { r.AccountType = "credit_card" })
+
+	result, err := Run(context.Background(), conn, newFetcher([]message{first, resend}), mailbox, "INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Bills != 2 || result.Failed != 0 {
+		t.Fatalf("result = %+v, want both statement mails read as bills and none failed", result)
+	}
+	if n := count(t, conn, `SELECT COUNT(*) FROM bills`); n != 1 {
+		t.Errorf("bills = %d, want the resend merged into 1", n)
+	}
+	if n := count(t, conn, `SELECT COUNT(*) FROM message_links WHERE parsed_as = 'bill' AND bill_id = (SELECT id FROM bills)`); n != 2 {
+		t.Errorf("%d statement mails link to the bill, want 2", n)
+	}
+	var total float64
+	var due string
+	var accountID int64
+	conn.QueryRow(`SELECT total_due, due_date, account_id FROM bills`).Scan(&total, &due, &accountID)
+	if total != 12345 || due != "2026-08-05" || accountID != card {
+		t.Errorf("bill = %.2f due %q account %d", total, due, accountID)
+	}
+}
+
+func TestTradeRuleBecomesAHolding(t *testing.T) {
+	conn := openDB(t)
+	from := "orders@indmoney.com"
+	sample := newMessage(901, from, "Your BUY order for Apple Inc for $245.73 is successful",
+		"Ticker: Apple Inc Amount: $245.73 Price: $245.73 Shares: 1 Order Type: Market US a/c: 12AB34")
+	msg := newMessage(902, from, "Your BUY order for Tesla Inc for $100.50 is successful",
+		"Ticker: Tesla Inc Amount: $100.50 Price: $50.25 Shares: 2 Order Type: Market US a/c: 12AB34")
+	mailbox := seedIndex(t, conn, []message{msg})
+
+	text := parserules.SampleText(sample.subject, sample.body)
+	bodyAt := strings.Index(text, "Ticker:")
+	spans := spansFor(t, text[bodyAt:], []mark{{"symbol", "Apple Inc"}, {"amount", "245.73"}, {"units", "1"}})
+	offset := utf8.RuneCountInString(text[:bodyAt])
+	for i := range spans {
+		spans[i].Start += offset
+		spans[i].End += offset
+	}
+	spans = append(spans, spansFor(t, text, []mark{{"side_word", "BUY"}})...)
+	fields, err := parserules.Derive(text, spans)
+	if err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+	rule := &parserules.Rule{
+		Name: "INDmoney orders", Kind: parserules.KindTrade, Enabled: true, Issuer: "INDmoney",
+		SenderDomain: "indmoney.com", AccountType: "investment", Fields: fields,
+		Attributes: parserules.Attributes{Currency: "USD", InstrumentKind: "us_stock"},
+	}
+	if _, err := parserules.Insert(conn, rule); err != nil {
 		t.Fatal(err)
 	}
 
-	body := "Dear Customer, Greetings from HDFC Bank!\n" +
-		"Rs.10000.00 is debited from your account ending 4125 towards VPA icclzr@yespay (Indian Clearing Corporation Ltd) on 07-08-26.\n" +
-		"UPI transaction reference no.: 658544375315.\n"
-	e := &emailparse.Email{Subject: "You have done a UPI txn", TextBody: body, Date: "07 Aug 2026"}
-	inst := &emailparse.Institution{Issuer: "HDFC", Name: "HDFC Bank", DefaultKind: emailparse.KindBank}
+	result, err := Run(context.Background(), conn, newFetcher([]message{msg}), mailbox, "INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Trades != 1 {
+		t.Fatalf("result = %+v, want 1 trade", result)
+	}
+	if n := count(t, conn, `SELECT COUNT(*) FROM transactions`); n != 0 {
+		t.Errorf("a broker order became %d ledger transactions", n)
+	}
+	var name, currency string
+	var units float64
+	if err := conn.QueryRow(`SELECT name, currency, COALESCE(units, 0) FROM investments`).Scan(&name, &currency, &units); err != nil {
+		t.Fatalf("no holding: %v", err)
+	}
+	if name != "Tesla Inc" || currency != "USD" || units != 2 {
+		t.Errorf("holding = %q %s %.2f", name, currency, units)
+	}
+	if n := count(t, conn, `SELECT COUNT(*) FROM investment_trades`); n != 1 {
+		t.Errorf("trades = %d, want 1", n)
+	}
+}
 
-	outcome := Persist(conn, inst, e)
-	if outcome.ParsedAs != "transaction" {
-		t.Fatalf("parsed as %q, want transaction", outcome.ParsedAs)
+// One unreadable batch must not starve the messages behind it.
+func TestFailedFetchDoesNotStarveLaterMessages(t *testing.T) {
+	conn := openDB(t)
+	sample := hdfcDebit(1001, "1234.00", "SWIGGY", "123456789012")
+	messages := []message{
+		hdfcDebit(1002, "10.00", "ONE", "111111111111"),
+		hdfcDebit(1003, "20.00", "TWO", "222222222222"),
+		hdfcDebit(1004, "30.00", "THREE", "333333333333"),
+	}
+	mailbox := seedIndex(t, conn, messages)
+	addAccount(t, conn, "HDFC Savings", "HDFC", "bank", "XXXXXXXX4125")
+	defineRule(t, conn, parserules.KindTransaction, "HDFC", "hdfcbank.net", sample, hdfcMarks, nil)
+
+	old := batchSizeForTest
+	batchSizeForTest = 1
+	t.Cleanup(func() { batchSizeForTest = old })
+
+	fetcher := newFetcher(messages)
+	fetcher.failUID = 1002
+	result, err := Run(context.Background(), conn, fetcher, mailbox, "INBOX")
+	if err != nil {
+		t.Fatalf("a failed batch must not fail the pass: %v", err)
+	}
+	if result.Failed != 1 || result.Transactions != 2 {
+		t.Errorf("result = %+v, want 1 failed and the 2 behind it imported", result)
 	}
 
-	var txnType, transferKind, counterparty string
-	if err := conn.QueryRow(`SELECT type, transfer_kind, counterparty FROM transactions WHERE id = ?`,
-		outcome.TransactionID).Scan(&txnType, &transferKind, &counterparty); err != nil {
-		t.Fatalf("reading transaction: %v", err)
+	// The failed message stays unlinked, so a later pass picks it up.
+	fetcher.failUID = 0
+	result, err = Run(context.Background(), conn, fetcher, mailbox, "INBOX")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if txnType != "transfer" {
-		t.Errorf("type = %q, want transfer — this is money funding a broker, not spending", txnType)
+	if result.Transactions != 1 {
+		t.Errorf("retry result = %+v, want the failed message imported", result)
 	}
-	if transferKind != "investment" {
-		t.Errorf("transferKind = %q, want investment", transferKind)
+}
+
+// The AI classifier can flag a message from a sender no registry or rule
+// names; it is then examined and, with nothing to read it, left visible as
+// unrecognized rather than skipped.
+func TestClassifierWidensTheNet(t *testing.T) {
+	conn := openDB(t)
+	msg := newMessage(1101, "billing@newfintech.example", "Payment received", "We received your payment of Rs 999.")
+	mailbox := seedIndex(t, conn, []message{msg})
+	var messageID int64
+	conn.QueryRow(`SELECT id FROM messages WHERE uid = 1101`).Scan(&messageID)
+	if _, err := conn.Exec(`INSERT INTO classifications (message_id, category, is_transactional, model)
+		VALUES (?, 'finance', 1, 'test')`, messageID); err != nil {
+		t.Fatal(err)
 	}
-	if counterparty != "Zerodha" {
-		t.Errorf("counterparty = %q, want Zerodha", counterparty)
+
+	result, err := Run(context.Background(), conn, newFetcher([]message{msg}), mailbox, "INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Scanned != 1 || result.Unrecognized != 1 {
+		t.Errorf("result = %+v, want the flagged message scanned and unrecognized", result)
+	}
+}
+
+// A rule whose sender matches but whose values this message doesn't carry
+// falls through to the next rule, so one sender can have several templates.
+func TestRulesFallThroughBySubject(t *testing.T) {
+	conn := openDB(t)
+	debitSample := hdfcDebit(1201, "1234.00", "SWIGGY", "123456789012")
+	balanceSample := newMessage(1202, hdfcFrom, "Balance update",
+		"The available balance in your account ending XX4125 is Rs. INR 2,08,870.09 as of 12-AUG-26.")
+	debit := hdfcDebit(1203, "500.00", "ZOMATO", "987654321098")
+	balance := newMessage(1204, hdfcFrom, "Balance update",
+		"The available balance in your account ending XX4125 is Rs. INR 1,500.00 as of 20-AUG-26.")
+	mailbox := seedIndex(t, conn, []message{debit, balance})
+	addAccount(t, conn, "HDFC Savings", "HDFC", "bank", "XXXXXXXX4125")
+	defineRule(t, conn, parserules.KindBalance, "HDFC", "hdfcbank.net", balanceSample, []mark{
+		{"balance", "2,08,870.09"}, {"account_last4", "XX4125"}, {"as_of", "12-AUG-26"},
+	}, func(r *parserules.Rule) { r.Priority = 10 })
+	defineRule(t, conn, parserules.KindTransaction, "HDFC", "hdfcbank.net", debitSample, hdfcMarks, nil)
+
+	result, err := Run(context.Background(), conn, newFetcher([]message{debit, balance}), mailbox, "INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Transactions != 1 || result.Balances != 1 {
+		t.Errorf("result = %+v, want one of each", result)
 	}
 }

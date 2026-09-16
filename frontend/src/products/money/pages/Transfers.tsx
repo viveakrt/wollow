@@ -1,11 +1,15 @@
+import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeftRight, Check, X, RefreshCw, Loader2 } from 'lucide-react'
 import { api } from '../api'
 import { formatINR, formatDate } from '../lib/format'
 import { Card } from '../components/Card'
+import { BillPaymentPrompt } from '../components/BillPaymentPrompt'
+import type { BillPaymentSuggestion } from '../types'
 
 export function Transfers() {
   const queryClient = useQueryClient()
+  const [billPrompt, setBillPrompt] = useState<BillPaymentSuggestion | null>(null)
 
   const { data: suggestions = [], isPending: loading } = useQuery({
     queryKey: ['money', 'transfer-suggestions'],
@@ -22,7 +26,10 @@ export function Transfers() {
   })
   const confirmMutation = useMutation({
     mutationFn: api.transferSuggestions.confirm,
-    onSuccess: invalidateMoney,
+    onSuccess: (res) => {
+      invalidateMoney()
+      if (res.billSuggestion?.bills.length) setBillPrompt(res.billSuggestion)
+    },
   })
   const dismissMutation = useMutation({
     mutationFn: api.transferSuggestions.dismiss,
@@ -119,6 +126,8 @@ export function Transfers() {
           ))}
         </div>
       )}
+
+      {billPrompt && <BillPaymentPrompt suggestion={billPrompt} onClose={() => setBillPrompt(null)} />}
     </div>
   )
 }

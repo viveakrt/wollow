@@ -47,20 +47,28 @@ type storedMessage struct {
 // moneyLink is the Mail-side view of a message_links row: the join that lets
 // the inbox say "this became a transaction" and link straight to it.
 type moneyLink struct {
-	ParsedAs      string   `json:"parsedAs"` // transaction | bill | unrecognized
+	ParsedAs      string   `json:"parsedAs"` // transaction | bill | balance | trade | pending_account | unrecognized
 	TransactionID *int64   `json:"transactionId,omitempty"`
 	BillID        *int64   `json:"billId,omitempty"`
+	InvestmentID  *int64   `json:"investmentId,omitempty"`
 	Amount        *float64 `json:"amount,omitempty"`
 	DueDate       string   `json:"dueDate,omitempty"`
 	Issuer        string   `json:"issuer,omitempty"`
+	// RuleID is the user-defined parser that read the message.
+	RuleID *int64 `json:"ruleId,omitempty"`
+	// PendingName/PendingLast4 describe the account a pending_account message
+	// is waiting for.
+	PendingName  string `json:"pendingName,omitempty"`
+	PendingLast4 string `json:"pendingLast4,omitempty"`
 }
 
 // moneyLinkColumns and scanMoneyLink keep the list and detail queries reading
 // the join identically; they must stay in step.
 const moneyLinkColumns = `
-	l.parsed_as, l.transaction_id, l.bill_id,
+	l.parsed_as, l.transaction_id, l.bill_id, l.investment_id,
 	CASE WHEN t.id IS NOT NULL THEN (t.withdrawal_amt + t.deposit_amt) ELSE b.total_due END,
-	COALESCE(b.due_date, ''), COALESCE(b.issuer, '')`
+	COALESCE(b.due_date, ''), COALESCE(b.issuer, ''),
+	l.rule_id, COALESCE(l.pending_name, ''), COALESCE(l.pending_last4, '')`
 
 const moneyLinkJoins = `
 	LEFT JOIN message_links l ON l.message_id = m.id
@@ -68,33 +76,47 @@ const moneyLinkJoins = `
 	LEFT JOIN bills b ON b.id = l.bill_id`
 
 type moneyLinkScan struct {
-	parsedAs sql.NullString
-	txnID    sql.NullInt64
-	billID   sql.NullInt64
-	amount   sql.NullFloat64
-	dueDate  string
-	issuer   string
+	parsedAs     sql.NullString
+	txnID        sql.NullInt64
+	billID       sql.NullInt64
+	investmentID sql.NullInt64
+	amount       sql.NullFloat64
+	dueDate      string
+	issuer       string
+	ruleID       sql.NullInt64
+	pendingName  string
+	pendingLast4 string
 }
 
 // Pointer receiver is load-bearing: a value receiver would hand Scan pointers
 // into a copy, and every link would silently come back nil.
 func (s *moneyLinkScan) dest() []any {
-	return []any{&s.parsedAs, &s.txnID, &s.billID, &s.amount, &s.dueDate, &s.issuer}
+	return []any{&s.parsedAs, &s.txnID, &s.billID, &s.investmentID, &s.amount, &s.dueDate, &s.issuer,
+		&s.ruleID, &s.pendingName, &s.pendingLast4}
 }
 
 func (s *moneyLinkScan) build() *moneyLink {
 	if !s.parsedAs.Valid {
 		return nil
 	}
-	link := &moneyLink{ParsedAs: s.parsedAs.String, DueDate: s.dueDate, Issuer: s.issuer}
+	link := &moneyLink{
+		ParsedAs: s.parsedAs.String, DueDate: s.dueDate, Issuer: s.issuer,
+		PendingName: s.pendingName, PendingLast4: s.pendingLast4,
+	}
 	if s.txnID.Valid {
 		link.TransactionID = &s.txnID.Int64
 	}
 	if s.billID.Valid {
 		link.BillID = &s.billID.Int64
 	}
+	if s.investmentID.Valid {
+		link.InvestmentID = &s.investmentID.Int64
+	}
 	if s.amount.Valid {
 		link.Amount = &s.amount.Float64
+	}
+	if s.ruleID.Valid {
+		link.RuleID = &s.ruleID.Int64
 	}
 	return link
 }

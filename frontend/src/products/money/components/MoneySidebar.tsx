@@ -8,6 +8,7 @@ import {
   Upload,
   Settings,
   Receipt,
+  Wand2,
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -18,6 +19,7 @@ const NAV_ITEMS = [
   { to: '/money/transfers', label: 'Transfers', icon: Shuffle },
   { to: '/money/investments', label: 'Investments', icon: TrendingUp },
   { to: '/money/bills', label: 'Bills', icon: Receipt },
+  { to: '/money/parsers', label: 'Parsers', icon: Wand2 },
   { to: '/money/import', label: 'Import Statement', icon: Upload },
 ]
 

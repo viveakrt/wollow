@@ -3,11 +3,13 @@ package moneyapi
 import (
 	"database/sql"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"wollow/backend/internal/money/ledger"
+	"wollow/backend/internal/money/marketdata"
 
 	"wollow/backend/internal/money/models"
 	"wollow/backend/internal/platform/httpx"
@@ -18,20 +20,24 @@ const investmentColumns = `
 	id, account_id, kind, institution, name, identifier, currency,
 	invested_amount, current_value, maturity_amount, interest_rate, units,
 	last_price, last_price_at,
+	price_source, quote_symbol, quote_error, realized_gain, realized_gain_inr, invested_inr,
 	start_date, maturity_date, status, source, notes, created_at, updated_at`
 
 func scanInvestment(scan func(...any) error) (models.Investment, error) {
 	var (
-		inv       models.Investment
-		accountID sql.NullInt64
-		maturity  sql.NullFloat64
-		rate      sql.NullFloat64
-		units     sql.NullFloat64
-		lastPrice sql.NullFloat64
+		inv         models.Investment
+		accountID   sql.NullInt64
+		maturity    sql.NullFloat64
+		rate        sql.NullFloat64
+		units       sql.NullFloat64
+		lastPrice   sql.NullFloat64
+		realizedINR sql.NullFloat64
+		investedINR sql.NullFloat64
 	)
 	err := scan(&inv.ID, &accountID, &inv.Kind, &inv.Institution, &inv.Name, &inv.Identifier,
 		&inv.Currency, &inv.InvestedAmount, &inv.CurrentValue, &maturity, &rate, &units,
 		&lastPrice, &inv.LastPriceAt,
+		&inv.PriceSource, &inv.QuoteSymbol, &inv.QuoteError, &inv.RealizedGain, &realizedINR, &investedINR,
 		&inv.StartDate, &inv.MaturityDate, &inv.Status, &inv.Source, &inv.Notes,
 		&inv.CreatedAt, &inv.UpdatedAt)
 	if err != nil {
@@ -39,6 +45,12 @@ func scanInvestment(scan func(...any) error) (models.Investment, error) {
 	}
 	if lastPrice.Valid {
 		inv.LastPrice = &lastPrice.Float64
+	}
+	if realizedINR.Valid {
+		inv.RealizedGainINR = &realizedINR.Float64
+	}
+	if investedINR.Valid {
+		inv.InvestedINR = &investedINR.Float64
 	}
 	// Gain is derived rather than stored so it can never disagree with the two
 	// figures it comes from.
@@ -99,6 +111,64 @@ func investmentHasTrades(db interface {
 	return n > 0
 }
 
+// inrRates loads every stored exchange rate up front; the pool's single connection can't query mid-iteration.
+func inrRates(db *sql.DB) map[string]float64 {
+	rates := map[string]float64{"INR": 1}
+	rows, err := db.Query(`SELECT UPPER(currency), inr_per_unit FROM fx_rates WHERE inr_per_unit > 0`)
+	if err != nil {
+		return rates
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var currency string
+		var rate float64
+		if rows.Scan(&currency, &rate) == nil {
+			rates[currency] = rate
+		}
+	}
+	return rates
+}
+
+// attachINR states each holding in rupees: value at today's rate, cost at its trades' own rates where known.
+func attachINR(invs []models.Investment, rates map[string]float64) {
+	for i := range invs {
+		inv := &invs[i]
+		currency := strings.ToUpper(strings.TrimSpace(inv.Currency))
+		if currency == "" || currency == "INR" {
+			if inv.InvestedINR == nil {
+				invested := inv.InvestedAmount
+				inv.InvestedINR = &invested
+			}
+			if inv.RealizedGainINR == nil {
+				realized := inv.RealizedGain
+				inv.RealizedGainINR = &realized
+			}
+		}
+		rate := rates[currency]
+		if currency == "" {
+			rate = 1
+		}
+		if rate <= 0 {
+			continue
+		}
+		value := inv.CurrentValue * rate
+		inv.ValueINR = &value
+		if inv.InvestedINR != nil {
+			gain := value - *inv.InvestedINR
+			inv.GainINR = &gain
+		}
+	}
+}
+
+// normalizeQuoteSymbol upper-cases a market symbol, keeping the "none" switch recognisable.
+func normalizeQuoteSymbol(symbol string) string {
+	symbol = strings.TrimSpace(symbol)
+	if strings.EqualFold(symbol, marketdata.NoQuote) {
+		return marketdata.NoQuote
+	}
+	return strings.ToUpper(symbol)
+}
+
 func (s *Server) handleListInvestments(w http.ResponseWriter, r *http.Request) {
 	where := "1 = 1"
 	args := []any{}
@@ -139,6 +209,7 @@ func (s *Server) handleListInvestments(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, 500, err.Error())
 		return
 	}
+	attachINR(investments, inrRates(s.DB))
 	httpx.WriteJSON(w, 200, investments)
 }
 
@@ -172,13 +243,21 @@ type investmentSummary struct {
 	// MaturingSoon is the holdings coming due within the next 90 days — the one
 	// thing about a deposit portfolio that is actually time-sensitive.
 	MaturingSoon []models.Investment `json:"maturingSoon"`
+	// Every holding in rupees: value at today's rate, cost and realised profit at each trade's own rate where known.
+	TotalValueINR         float64  `json:"totalValueInr"`
+	TotalInvestedINR      float64  `json:"totalInvestedInr"`
+	UnrealizedGainINR     float64  `json:"unrealizedGainInr"`
+	RealizedGainINR       float64  `json:"realizedGainInr"`
+	UnconvertedCurrencies []string `json:"unconvertedCurrencies"`
+	PricesUpdatedAt       string   `json:"pricesUpdatedAt"`
 }
 
 func (s *Server) handleInvestmentSummary(w http.ResponseWriter, r *http.Request) {
 	summary := investmentSummary{
-		ByKind:       []investmentKindTotal{},
-		ByCurrency:   []investmentCurrencyTotal{},
-		MaturingSoon: []models.Investment{},
+		ByKind:                []investmentKindTotal{},
+		ByCurrency:            []investmentCurrencyTotal{},
+		MaturingSoon:          []models.Investment{},
+		UnconvertedCurrencies: []string{},
 	}
 
 	rows, err := s.DB.Query(`
@@ -245,8 +324,66 @@ func (s *Server) handleInvestmentSummary(w http.ResponseWriter, r *http.Request)
 		}
 		summary.MaturingSoon = append(summary.MaturingSoon, inv)
 	}
+	maturing.Close()
 
+	if err := s.addRupeeTotals(&summary); err != nil {
+		httpx.WriteError(w, 500, err.Error())
+		return
+	}
 	httpx.WriteJSON(w, 200, summary)
+}
+
+// addRupeeTotals sums every holding in rupees. Realised profit counts closed holdings too — that is where it lives.
+func (s *Server) addRupeeTotals(summary *investmentSummary) error {
+	rates := inrRates(s.DB)
+	rows, err := s.DB.Query(`
+		SELECT UPPER(currency), status, current_value, invested_amount, invested_inr, realized_gain, realized_gain_inr
+		FROM investments`)
+	if err != nil {
+		return err
+	}
+	unconverted := map[string]bool{}
+	for rows.Next() {
+		var currency, status string
+		var value, invested, realized float64
+		var investedINR, realizedINR sql.NullFloat64
+		if err := rows.Scan(&currency, &status, &value, &invested, &investedINR, &realized, &realizedINR); err != nil {
+			rows.Close()
+			return err
+		}
+		if currency == "" {
+			currency = "INR"
+		}
+		rate := rates[currency]
+		if rate <= 0 {
+			if status == "active" || realized != 0 {
+				unconverted[currency] = true
+			}
+			continue
+		}
+		if realizedINR.Valid {
+			summary.RealizedGainINR += realizedINR.Float64
+		} else {
+			summary.RealizedGainINR += realized * rate
+		}
+		if status != "active" {
+			continue
+		}
+		summary.TotalValueINR += value * rate
+		if investedINR.Valid {
+			summary.TotalInvestedINR += investedINR.Float64
+		} else {
+			summary.TotalInvestedINR += invested * rate
+		}
+	}
+	rows.Close()
+	summary.UnrealizedGainINR = summary.TotalValueINR - summary.TotalInvestedINR
+	for currency := range unconverted {
+		summary.UnconvertedCurrencies = append(summary.UnconvertedCurrencies, currency)
+	}
+	sort.Strings(summary.UnconvertedCurrencies)
+	return s.DB.QueryRow(`SELECT COALESCE(MAX(last_price_at), '') FROM investments WHERE price_source = 'market'`).
+		Scan(&summary.PricesUpdatedAt)
 }
 
 func (s *Server) handleCreateInvestment(w http.ResponseWriter, r *http.Request) {
@@ -260,16 +397,17 @@ func (s *Server) handleCreateInvestment(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	applyInvestmentDefaults(&inv)
+	inv.QuoteSymbol = normalizeQuoteSymbol(inv.QuoteSymbol)
 
 	res, err := s.DB.Exec(`
 		INSERT INTO investments
 			(account_id, kind, institution, name, identifier, currency, invested_amount,
 			 current_value, maturity_amount, interest_rate, units, start_date, maturity_date,
-			 status, source, notes)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?)`,
+			 status, source, notes, quote_symbol)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, ?)`,
 		inv.AccountID, inv.Kind, inv.Institution, inv.Name, inv.Identifier, inv.Currency,
 		inv.InvestedAmount, inv.CurrentValue, inv.MaturityAmount, inv.InterestRate, inv.Units,
-		inv.StartDate, inv.MaturityDate, inv.Status, inv.Notes)
+		inv.StartDate, inv.MaturityDate, inv.Status, inv.Notes, inv.QuoteSymbol)
 	if err != nil {
 		httpx.WriteError(w, 500, err.Error())
 		return
@@ -295,11 +433,12 @@ func (s *Server) handleUpdateInvestment(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, 400, "invalid id")
 		return
 	}
-	var inv models.Investment
-	if err := httpx.DecodeJSON(r, &inv); err != nil {
+	var payload investmentPayload
+	if err := httpx.DecodeJSON(r, &payload); err != nil {
 		httpx.WriteError(w, 400, "invalid body")
 		return
 	}
+	inv := payload.Investment
 	applyInvestmentDefaults(&inv)
 
 	hasTrades := investmentHasTrades(s.DB, id)
@@ -337,14 +476,23 @@ func (s *Server) handleUpdateInvestment(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	row := s.DB.QueryRow(`SELECT`+investmentColumns+` FROM investments WHERE id = ?`, id)
-	updated, err := scanInvestment(row.Scan)
-	if err != nil {
-		httpx.WriteError(w, 404, "holding not found")
-		return
+	if payload.QuoteSymbolOpt != nil {
+		symbol := normalizeQuoteSymbol(*payload.QuoteSymbolOpt)
+		// A changed symbol starts clean: the old one's error no longer applies.
+		if _, err := s.DB.Exec(`UPDATE investments
+			SET quote_error = CASE WHEN quote_symbol = ? THEN quote_error ELSE '' END, quote_symbol = ?
+			WHERE id = ?`, symbol, symbol, id); err != nil {
+			httpx.WriteError(w, 500, err.Error())
+			return
+		}
 	}
-	updated.HasTrades = hasTrades
-	httpx.WriteJSON(w, 200, updated)
+	s.writeInvestmentWithTrades(w, id)
+}
+
+// investmentPayload tells an omitted quoteSymbol apart from a cleared one, so an edit never wipes a symbol it didn't mention.
+type investmentPayload struct {
+	models.Investment
+	QuoteSymbolOpt *string `json:"quoteSymbol"`
 }
 
 func (s *Server) handleDeleteInvestment(w http.ResponseWriter, r *http.Request) {
@@ -369,6 +517,9 @@ func applyInvestmentDefaults(inv *models.Investment) {
 	}
 	if inv.Currency == "" {
 		inv.Currency = "INR"
+		if inv.Kind == "us_stock" {
+			inv.Currency = "USD"
+		}
 	}
 	if inv.Status == "" {
 		inv.Status = "active"
@@ -389,7 +540,7 @@ func (s *Server) handleListInvestmentTrades(w http.ResponseWriter, r *http.Reque
 	}
 	rows, err := s.DB.Query(`
 		SELECT id, investment_id, side, shares, price, amount, currency,
-		       trade_date, order_type, source, created_at
+		       trade_date, order_type, source, fx_rate, created_at
 		FROM investment_trades WHERE investment_id = ?
 		ORDER BY trade_date DESC, id DESC`, id)
 	if err != nil {
@@ -401,10 +552,14 @@ func (s *Server) handleListInvestmentTrades(w http.ResponseWriter, r *http.Reque
 	trades := []models.InvestmentTrade{}
 	for rows.Next() {
 		var t models.InvestmentTrade
+		var fx sql.NullFloat64
 		if err := rows.Scan(&t.ID, &t.InvestmentID, &t.Side, &t.Shares, &t.Price, &t.Amount,
-			&t.Currency, &t.TradeDate, &t.OrderType, &t.Source, &t.CreatedAt); err != nil {
+			&t.Currency, &t.TradeDate, &t.OrderType, &t.Source, &fx, &t.CreatedAt); err != nil {
 			httpx.WriteError(w, 500, err.Error())
 			return
+		}
+		if fx.Valid {
+			t.FXRate = &fx.Float64
 		}
 		trades = append(trades, t)
 	}
@@ -416,13 +571,7 @@ type setPriceRequest struct {
 	AsOf  string  `json:"asOf"`
 }
 
-// handleSetInvestmentPrice records the current per-unit price of a holding and
-// re-values it.
-//
-// Prices are entered rather than fetched: Money has no market data feed, and
-// inventing one would mean shipping a number nobody can check. With a price
-// the holding reports a real gain; without one it reports its cost and says as
-// much through `priced`.
+// handleSetInvestmentPrice records a price the user typed; the next market refresh replaces it for a holding with a symbol.
 func (s *Server) handleSetInvestmentPrice(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -441,20 +590,12 @@ func (s *Server) handleSetInvestmentPrice(w http.ResponseWriter, r *http.Request
 	if req.AsOf == "" {
 		req.AsOf = time.Now().UTC().Format("2006-01-02")
 	}
-	if err := ledger.SetHoldingPrice(s.DB, id, req.Price, req.AsOf); err != nil {
+	if err := ledger.SetHoldingPrice(s.DB, id, req.Price, req.AsOf, "manual"); err != nil {
 		httpx.WriteError(w, 500, err.Error())
 		return
 	}
 
-	var inv models.Investment
-	row := s.DB.QueryRow(`SELECT`+investmentColumns+` FROM investments WHERE id = ?`, id)
-	inv, err = scanInvestment(row.Scan)
-	if err != nil {
-		httpx.WriteError(w, 404, "holding not found")
-		return
-	}
-	inv.HasTrades = investmentHasTrades(s.DB, id)
-	httpx.WriteJSON(w, 200, inv)
+	s.writeInvestmentWithTrades(w, id)
 }
 
 type addTradeRequest struct {
@@ -559,10 +700,12 @@ func (s *Server) handleUpdateInvestmentTrade(w http.ResponseWriter, r *http.Requ
 		req.Price = req.Amount / req.Shares
 	}
 
+	// A moved trade date needs its exchange rate looked up again.
 	res, err := s.DB.Exec(`
-		UPDATE investment_trades SET side = ?, shares = ?, price = ?, amount = ?, trade_date = ?, order_type = ?
+		UPDATE investment_trades SET side = ?, shares = ?, price = ?, amount = ?,
+			fx_rate = CASE WHEN trade_date = ? THEN fx_rate ELSE NULL END, trade_date = ?, order_type = ?
 		WHERE id = ? AND investment_id = ?`,
-		req.Side, req.Shares, req.Price, req.Amount, req.TradeDate, req.OrderType, tradeID, id)
+		req.Side, req.Shares, req.Price, req.Amount, req.TradeDate, req.TradeDate, req.OrderType, tradeID, id)
 	if err != nil {
 		httpx.WriteError(w, 500, err.Error())
 		return
@@ -620,5 +763,7 @@ func (s *Server) writeInvestmentWithTrades(w http.ResponseWriter, id int64) {
 		return
 	}
 	inv.HasTrades = investmentHasTrades(s.DB, id)
-	httpx.WriteJSON(w, 200, inv)
+	one := []models.Investment{inv}
+	attachINR(one, inrRates(s.DB))
+	httpx.WriteJSON(w, 200, one[0])
 }

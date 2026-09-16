@@ -64,13 +64,13 @@ func main() {
 	// After every sync pass, read finance mail out of the index that pass just
 	// refreshed — on the same connection, so one mailbox means one IMAP session.
 	mailSrv.AfterSync = func(ctx context.Context, accountID int64, provider mail.Provider) error {
-		result, err := ingest.RunWithPasswords(ctx, database, provider, accountID, "INBOX", moneySrv.PDFPasswordLookup())
+		result, err := ingest.Run(ctx, database, provider, accountID, "INBOX")
 		if err != nil {
 			return err
 		}
-		if result.Transactions > 0 || result.Bills > 0 || result.Unrecognized > 0 {
-			log.Printf("ingest: account %d scanned=%d transactions=%d bills=%d unrecognized=%d",
-				accountID, result.Scanned, result.Transactions, result.Bills, result.Unrecognized)
+		if result.Transactions > 0 || result.Bills > 0 || result.Unrecognized > 0 || result.PendingAccount > 0 {
+			log.Printf("ingest: account %d scanned=%d transactions=%d bills=%d pending=%d unrecognized=%d",
+				accountID, result.Scanned, result.Transactions, result.Bills, result.PendingAccount, result.Unrecognized)
 		}
 		return nil
 	}
@@ -83,6 +83,7 @@ func main() {
 	// Keep the local message index warm in the background so the inbox is
 	// current without the user having to hit "Sync now".
 	go runPeriodicSync(ctx, mailSrv)
+	go runPeriodicPriceRefresh(ctx, moneySrv)
 
 	server := &http.Server{
 		Addr:    cfg.Addr,
@@ -279,6 +280,41 @@ func withRequestLog(next http.Handler) http.Handler {
 			log.Printf("%s %s -> %d in %s", r.Method, r.URL.Path, recorder.status, elapsed.Round(time.Millisecond))
 		}
 	})
+}
+
+// priceRefreshInterval is how often live prices and exchange rates are fetched.
+const priceRefreshInterval = 30 * time.Minute
+
+func runPeriodicPriceRefresh(ctx context.Context, server *moneyapi.Server) {
+	refresh := func() {
+		runCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		res, err := server.Market.Run(runCtx, 0)
+		if err != nil {
+			log.Printf("prices: refresh failed: %v", err)
+			return
+		}
+		if res.Priced > 0 || res.Failed > 0 || res.TradeRates > 0 {
+			log.Printf("prices: priced=%d failed=%d rates=%v trade-rates=%d",
+				res.Priced, res.Failed, res.RatesUpdated, res.TradeRates)
+		}
+	}
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(20 * time.Second):
+	}
+	refresh()
+	ticker := time.NewTicker(priceRefreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			refresh()
+		}
+	}
 }
 
 // syncInterval is how often the background sync refreshes every account.

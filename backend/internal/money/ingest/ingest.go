@@ -1,5 +1,6 @@
 // Package ingest turns finance mail already sitting in the shared message
-// index into transactions and bills.
+// index into transactions, bills, balances and trades, by applying the parser
+// rules the user defined (money/parserules).
 //
 // It does not talk to IMAP. Mail's sync pass is the single ingestion pipeline
 // for the whole app; this package reads what that pass indexed, asks the
@@ -7,10 +8,10 @@
 // the results back with a message_links row joining each message to whatever
 // Money made of it.
 //
-// Before the merge this was a second IMAP client with its own credentials,
-// its own UID cursor and its own dedupe table, scanning a hardcoded list of
-// four sender domains. Candidate selection is now a SQL query over the index,
-// which is what lets the AI classifier widen the net past that list.
+// It never creates accounts either. A message a rule reads but whose account
+// nobody has registered is linked as pending_account, with what the message
+// said about the account, so the user can add exactly that account — after
+// which the held messages are read again.
 package ingest
 
 import (
@@ -25,19 +26,8 @@ import (
 	"wollow/backend/internal/money/emailparse"
 	"wollow/backend/internal/money/ledger"
 	"wollow/backend/internal/money/models"
-	"wollow/backend/internal/money/pdfparse"
+	"wollow/backend/internal/money/parserules"
 )
-
-// PDFPasswordLookup returns the plaintext password configured for a
-// statement issuer, and whether one is configured at all.
-//
-// It is a function rather than ingest reaching into pdf_passwords itself,
-// because the passwords are encrypted at rest and ingest has no reason to
-// know how — that stays with whoever holds the crypto box (moneyapi.Server
-// today). nil means "nothing is ever configured", which degrades safely: a
-// password-protected statement is held pending exactly like mail naming an
-// account nobody registered, and picks up the moment one is added.
-type PDFPasswordLookup func(issuer string) (password string, ok bool)
 
 // batchSizeForTest caps how many messages one pass pulls bodies for. A first
 // sync of a long-lived mailbox can match thousands; fetching them all in one go
@@ -51,14 +41,14 @@ type Result struct {
 	Transactions int `json:"transactions"`
 	Bills        int `json:"bills"`
 	Balances     int `json:"balances"`
-	Unrecognized int `json:"unrecognized"`
-	Duplicates   int `json:"duplicates"`
 	// Trades counts broker order confirmations turned into holdings.
 	Trades int `json:"trades"`
-	// PendingPDFPassword counts password-protected statements (a Zerodha
-	// contract note, a demat holding statement) waiting on a password for
-	// their issuer. Same held-for-retry treatment as PendingAccount.
-	PendingPDFPassword int `json:"pendingPdfPassword"`
+	// PendingAccount counts messages a rule read whose account nobody has
+	// registered yet. They are held, listed for the user, and read again once
+	// the account exists.
+	PendingAccount int `json:"pendingAccount"`
+	Unrecognized   int `json:"unrecognized"`
+	Duplicates     int `json:"duplicates"`
 	// Failed counts messages this pass could not fetch or record. They stay
 	// unlinked and are retried next pass. It is reported rather than returned
 	// as an error because the rest of the pass still did useful work.
@@ -82,26 +72,21 @@ type candidate struct {
 
 // Run processes every not-yet-examined finance message for one mailbox.
 //
-// A message qualifies if it is from a known issuer domain, or if the AI
-// classifier flagged it as transactional. The second arm is the point of
-// reading the index: it surfaces issuers no parser has ever been taught, which
-// then land as 'unrecognized' rather than being silently skipped.
-//
-// Equivalent to RunWithPasswords with no password source configured —
-// password-protected investment statements are simply held pending.
+// A message qualifies if it is from a known issuer domain, from a sender one
+// of the user's rules names, or if the AI classifier flagged it as
+// transactional. The last two arms are the point of reading the index: they
+// surface senders the registry has never heard of, which then either match a
+// rule or land as 'unrecognized' — visible, rather than silently skipped.
 func Run(ctx context.Context, db *sql.DB, fetcher RawFetcher, accountID int64, folder string) (*Result, error) {
-	return RunWithPasswords(ctx, db, fetcher, accountID, folder, nil)
-}
-
-// RunWithPasswords is Run, with password-protected investment statements
-// (a broker's contract note, a demat holding statement) decryptable through
-// lookup.
-func RunWithPasswords(ctx context.Context, db *sql.DB, fetcher RawFetcher, accountID int64, folder string, lookup PDFPasswordLookup) (*Result, error) {
 	if folder == "" {
 		folder = "INBOX"
 	}
 
-	candidates, err := selectCandidates(db, accountID, folder)
+	rules, err := loadRules(db)
+	if err != nil {
+		return nil, fmt.Errorf("loading parser rules: %w", err)
+	}
+	candidates, err := selectCandidates(db, accountID, folder, rules)
 	if err != nil {
 		return nil, fmt.Errorf("selecting finance mail: %w", err)
 	}
@@ -127,12 +112,11 @@ func RunWithPasswords(ctx context.Context, db *sql.DB, fetcher RawFetcher, accou
 		if err != nil {
 			// One unreadable batch must not end the pass.
 			//
-			// Messages held for a missing account are deliberately left
-			// unlinked so they can be retried, which means they stay at the
-			// front of this UID-ordered queue. Aborting here therefore did not
-			// merely skip a batch — it starved every message behind it on
-			// every subsequent run, permanently. Mail kept arriving and
-			// nothing was ever imported again.
+			// Messages that failed stay unlinked so they can be retried, which
+			// means they stay at the front of this UID-ordered queue. Aborting
+			// here therefore did not merely skip a batch — it starved every
+			// message behind it on every subsequent run, permanently. Mail kept
+			// arriving and nothing was ever imported again.
 			log.Printf("ingest: fetching %d bodies at uid %d failed, skipping batch: %v",
 				len(uids), uids[0], err)
 			result.Failed += len(uids)
@@ -151,7 +135,7 @@ func RunWithPasswords(ctx context.Context, db *sql.DB, fetcher RawFetcher, accou
 				continue
 			}
 			result.Scanned++
-			if err := processOne(db, accountID, c, raw, result, lookup); err != nil {
+			if err := processOne(db, accountID, c, raw, result, rules); err != nil {
 				// Same reasoning as a failed fetch: one message that cannot be
 				// recorded must not stop the ones behind it.
 				log.Printf("ingest: recording message %d failed: %v", c.messageID, err)
@@ -163,7 +147,22 @@ func RunWithPasswords(ctx context.Context, db *sql.DB, fetcher RawFetcher, accou
 	return result, nil
 }
 
-func processOne(db *sql.DB, accountID int64, c candidate, raw []byte, result *Result, lookup PDFPasswordLookup) error {
+// loadRules prepares every enabled rule. A rule that no longer compiles is
+// skipped and logged rather than failing the pass: one broken rule must not
+// stop every other sender's mail.
+func loadRules(db *sql.DB) ([]*parserules.Compiled, error) {
+	rules, err := parserules.LoadEnabled(db)
+	if err != nil {
+		return nil, err
+	}
+	compiled, errs := parserules.CompileAll(rules)
+	for _, e := range errs {
+		log.Printf("ingest: skipping parser rule: %v", e)
+	}
+	return compiled, nil
+}
+
+func processOne(db *sql.DB, accountID int64, c candidate, raw []byte, result *Result, rules []*parserules.Compiled) error {
 	parsed, err := emailparse.ParseEML(raw)
 	if err != nil {
 		return nil // unparseable MIME; leave it unlinked so a later fix can retry
@@ -175,14 +174,17 @@ func processOne(db *sql.DB, accountID int64, c candidate, raw []byte, result *Re
 		rfcID = parsed.MessageID
 	}
 
-	outcome := PersistWithPasswords(db, emailparse.InstitutionForSender(parsed.From), parsed, lookup)
-	parsedAs, txnID, billID := outcome.ParsedAs, outcome.TransactionID, outcome.BillID
+	outcome := Persist(db, rules, parsed)
 	var investmentID *int64
 	if outcome.InvestmentID != 0 {
 		investmentID = &outcome.InvestmentID
 	}
+	pending := PendingHint{}
+	if outcome.Pending != nil {
+		pending = *outcome.Pending
+	}
 
-	switch parsedAs {
+	switch outcome.ParsedAs {
 	case "transaction":
 		result.Transactions++
 	case "bill":
@@ -191,11 +193,8 @@ func processOne(db *sql.DB, accountID int64, c candidate, raw []byte, result *Re
 		result.Balances++
 	case "trade":
 		result.Trades++
-	case pendingPDFPasswordOutcome:
-		// Same reasoning, for a statement this pass can't open yet: adding or
-		// fixing the password in Settings and syncing again picks it back up.
-		result.PendingPDFPassword++
-		return nil
+	case "pending_account":
+		result.PendingAccount++
 	default:
 		result.Unrecognized++
 	}
@@ -205,33 +204,60 @@ func processOne(db *sql.DB, accountID int64, c candidate, raw []byte, result *Re
 	res, err := db.Exec(`
 		INSERT INTO message_links
 			(mail_account_id, message_id, rfc_message_id, uid, sender, subject,
-			 received_at, parsed_as, transaction_id, bill_id, investment_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 received_at, parsed_as, transaction_id, bill_id, investment_id, rule_id,
+			 pending_issuer, pending_name, pending_last4, pending_kind)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(mail_account_id, rfc_message_id) DO NOTHING`,
 		accountID, c.messageID, rfcID, c.uid, parsed.From, parsed.Subject,
-		parsed.Date, parsedAs, txnID, billID, investmentID)
+		parsed.Date, outcome.ParsedAs, outcome.TransactionID, outcome.BillID, investmentID,
+		ledger.NullIfZeroID(outcome.RuleID),
+		pending.Issuer, pending.Name, pending.Last4, pending.Kind)
 	if err != nil {
 		return fmt.Errorf("linking message %d: %w", c.messageID, err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		result.Duplicates++
+		return nil
+	}
+	if outcome.RuleID != 0 {
+		parserules.RecordMatch(db, outcome.RuleID)
 	}
 	return nil
 }
 
 // selectCandidates returns indexed messages for this mailbox that Money has not
 // linked yet and that look like finance mail.
-func selectCandidates(db *sql.DB, accountID int64, folder string) ([]candidate, error) {
+func selectCandidates(db *sql.DB, accountID int64, folder string, rules []*parserules.Compiled) ([]candidate, error) {
 	args := []interface{}{accountID, folder}
 
-	// Each registry domain is matched exactly *and* as a parent of the sender's
-	// domain, because banks send from alerts.<bank>.com as readily as from
-	// <bank>.com and an exact-only IN clause missed every one of those.
-	clauses := make([]string, 0, len(emailparse.AllowedSenderDomains))
-	for _, domain := range emailparse.AllowedSenderDomains {
-		domain = strings.ToLower(domain)
+	// Each domain is matched exactly *and* as a parent of the sender's domain,
+	// because banks send from alerts.<bank>.com as readily as from <bank>.com
+	// and an exact-only IN clause missed every one of those.
+	seen := map[string]bool{}
+	var clauses []string
+	addDomain := func(domain string) {
+		domain = strings.ToLower(strings.TrimSpace(domain))
+		if domain == "" || seen[domain] {
+			return
+		}
+		seen[domain] = true
 		clauses = append(clauses, "(m.from_domain = ? OR m.from_domain LIKE ?)")
 		args = append(args, domain, "%."+domain)
+	}
+	for _, domain := range emailparse.AllowedSenderDomains {
+		addDomain(domain)
+	}
+	plain := make([]*parserules.Rule, 0, len(rules))
+	for _, c := range rules {
+		plain = append(plain, c.Rule)
+	}
+	domains, emails := parserules.Senders(plain)
+	for _, domain := range domains {
+		addDomain(domain)
+	}
+	for _, email := range emails {
+		clauses = append(clauses, "LOWER(m.from_email) = ?")
+		args = append(args, email)
 	}
 
 	// Two exclusions, deliberately both present: message_id catches anything
@@ -273,27 +299,15 @@ func selectCandidates(db *sql.DB, accountID int64, folder string) ([]candidate, 
 }
 
 // RescanStuck clears message_links rows that deserve another pass through the
-// parsers rather than standing forever as their first result. Once a message
-// has any message_links row, selectCandidates never looks at it again — so
-// without this, nothing below ever gets a second chance.
+// parsers, and returns how many it cleared.
 //
-// Two situations qualify:
-//
-//   - Orphaned: a message correctly read as a transaction, bill, or trade
-//     whose target row was later deleted (an account's transactions cascade
-//     away with it; bills and trades instead survive with their link column
-//     set to NULL). Recreating the account should bring the old mail back,
-//     not just catch new mail from here on.
-//   - Unrecognized: a message the parsers could not read at the time —
-//     because the account it named did not exist yet (accounts now
-//     auto-create, but this link predates that), or because the parser has
-//     since learned the template. Re-linking costs nothing: anything still
-//     genuinely unparseable just lands back as 'unrecognized' unchanged.
-//
-// Orphaned links are only removed when their target is confirmed gone
-// (transaction_id/bill_id/investment_id IS NULL for that parsed_as), never one
-// still pointing at a real row — so this can add missing history but never
-// relabel or duplicate anything already correct.
+// Once a message is linked, selectCandidates never looks at it again. That is
+// right for a message that became a real row, and wrong for three kinds of
+// row: a link whose transaction/bill/holding was deleted from under it
+// (recreating the account should bring the mail back), a message held for an
+// account that has since been added, and a message nobody had a rule for when
+// it arrived. Only those are cleared — never a link still pointing at a real
+// row, so a rescan cannot relabel or duplicate anything already correct.
 func RescanStuck(db *sql.DB, mailAccountID int64) (int64, error) {
 	res, err := db.Exec(`
 		DELETE FROM message_links
@@ -301,6 +315,7 @@ func RescanStuck(db *sql.DB, mailAccountID int64) (int64, error) {
 		  AND ((parsed_as = 'transaction' AND transaction_id IS NULL)
 		    OR (parsed_as = 'bill' AND bill_id IS NULL)
 		    OR (parsed_as = 'trade' AND investment_id IS NULL)
+		    OR parsed_as = 'pending_account'
 		    OR parsed_as = 'unrecognized')`,
 		mailAccountID)
 	if err != nil {
@@ -310,16 +325,97 @@ func RescanStuck(db *sql.DB, mailAccountID int64) (int64, error) {
 	return n, nil
 }
 
-// pendingPDFPasswordOutcome marks a password-protected investment statement
-// this pass could not open. No link is written, so it is retried once a
-// password is configured.
-const pendingPDFPasswordOutcome = "pending_pdf_password"
+// ClearPendingFor releases the messages held for an account that now exists,
+// so the next sync reads them. Digits identify an account when the mail
+// stated them; a digit-less hint (a wallet) is matched on the institution,
+// with the same tolerance ledger.MatchAccount has for how the user typed it.
+func ClearPendingFor(db *sql.DB, bank, last4 string) (int64, error) {
+	var total int64
+	if last4 != "" {
+		res, err := db.Exec(`
+			DELETE FROM message_links WHERE parsed_as = 'pending_account' AND pending_last4 = ?`, last4)
+		if err != nil {
+			return 0, err
+		}
+		n, _ := res.RowsAffected()
+		total += n
+	}
+
+	bank = strings.ToLower(strings.TrimSpace(bank))
+	if bank == "" {
+		return total, nil
+	}
+	rows, err := db.Query(`
+		SELECT DISTINCT pending_issuer FROM message_links
+		WHERE parsed_as = 'pending_account' AND pending_last4 = ''`)
+	if err != nil {
+		return total, err
+	}
+	var issuers []string
+	for rows.Next() {
+		var issuer string
+		if err := rows.Scan(&issuer); err != nil {
+			rows.Close()
+			return total, err
+		}
+		issuers = append(issuers, issuer)
+	}
+	rows.Close()
+
+	for _, issuer := range issuers {
+		if issuer == "" {
+			continue
+		}
+		if strings.ToLower(issuer) != bank &&
+			strings.ToLower(emailparse.DisplayNameForIssuer(issuer)) != bank {
+			continue
+		}
+		res, err := db.Exec(`
+			DELETE FROM message_links
+			WHERE parsed_as = 'pending_account' AND pending_last4 = '' AND pending_issuer = ?`, issuer)
+		if err != nil {
+			return total, err
+		}
+		n, _ := res.RowsAffected()
+		total += n
+	}
+	return total, nil
+}
+
+// ClearForRule releases the messages from a rule's sender that nothing could
+// read before the rule existed, so a rescan applies the new rule to them.
+func ClearForRule(db *sql.DB, mailAccountID int64, rule *parserules.Rule) (int64, error) {
+	domain := strings.ToLower(strings.TrimSpace(rule.SenderDomain))
+	email := strings.ToLower(strings.TrimSpace(rule.SenderEmail))
+	if domain == "" && email == "" {
+		return 0, nil
+	}
+	res, err := db.Exec(`
+		DELETE FROM message_links
+		WHERE mail_account_id = ?
+		  AND parsed_as IN ('unrecognized', 'pending_account')
+		  AND ((? != '' AND LOWER(sender) = ?)
+		    OR (? != '' AND (LOWER(sender) LIKE '%@' || ? OR LOWER(sender) LIKE '%.' || ?)))`,
+		mailAccountID, email, email, domain, domain, domain)
+	if err != nil {
+		return 0, fmt.Errorf("clearing links for rule %d: %w", rule.ID, err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// PendingHint is what a message said about an account nobody has registered.
+type PendingHint struct {
+	Issuer string
+	Name   string
+	Last4  string
+	Kind   string
+}
 
 // Outcome is what Money made of a single message.
 type Outcome struct {
-	// ParsedAs is transaction | bill | balance | trade | unrecognized, and
-	// lands in message_links so the inbox can show it. The one value that does
-	// not is pending_pdf_password.
+	// ParsedAs is transaction | bill | balance | trade | pending_account |
+	// unrecognized, and lands in message_links so the inbox can show it.
 	ParsedAs      string
 	TransactionID *int64
 	BillID        *int64
@@ -327,85 +423,125 @@ type Outcome struct {
 	// InvestmentID is set when the message was a broker order and became a
 	// holding rather than a ledger entry.
 	InvestmentID int64
+	// RuleID is the parser rule that read the message, if one did.
+	RuleID int64
+	// Pending is set with ParsedAs = pending_account.
+	Pending *PendingHint
 }
 
 func unrecognized() Outcome { return Outcome{ParsedAs: "unrecognized"} }
 
-func pendingPDFPassword() Outcome { return Outcome{ParsedAs: pendingPDFPasswordOutcome} }
-
-// Persist reads one already-decoded email and writes whatever it describes: a
-// transaction, a bill reminder, or — new, and the reason balances used to go
-// stale — a bank-reported balance.
-//
-// Equivalent to PersistWithPasswords with no password source — password-
-// protected investment statements are held pending.
-func Persist(db *sql.DB, inst *emailparse.Institution, e *emailparse.Email) Outcome {
-	return PersistWithPasswords(db, inst, e, nil)
-}
-
-// PersistWithPasswords is Persist, with password-protected investment
-// statements decryptable through lookup (see Zerodha's contract notes and
-// demat holding statements, handled by persistZerodhaMail).
-//
-// Every message also gets its account facts recorded, transaction alerts
-// included: a spend alert that ends with "available balance: INR 2,08,870.09"
-// tells us both things, and only reading the first half is how an account's
-// balance drifted from the bank's.
-func PersistWithPasswords(db *sql.DB, inst *emailparse.Institution, e *emailparse.Email, lookup PDFPasswordLookup) Outcome {
-	issuer := ""
-	institutionName := ""
-	if inst != nil {
-		issuer = inst.Issuer
-		institutionName = inst.Name
-	}
-
-	facts := emailparse.ParseAccountFacts(e.Subject, e.TextBody)
-	kind := string(emailparse.KindForAlert(inst, e.Subject, e.TextBody))
+// Persist reads one already-decoded email through the given rules and writes
+// whatever the first rule that reads it describes. Rules are tried in the
+// order given (priority first); a rule whose sender matches but whose values
+// can't be read from this particular message falls through to the next.
+func Persist(db *sql.DB, rules []*parserules.Compiled, e *emailparse.Email) Outcome {
+	text := parserules.SampleText(e.Subject, e.TextBody)
 	emailDate := emailparse.ParseAlertDate(e.Date)
 	if emailDate == "" {
 		emailDate = normalizeRFCDate(e.Date)
 	}
+	fromDomain := domainOf(e.From)
 
-	// Trades are matched before anything else. A broker's "BUY order ... for
-	// $245.73 is successful" carries an amount and a direction word, so the
-	// generic alert reader would book it as a $245.73 bank expense — money
-	// that never left a tracked account, and a holding that never appears.
-	if trade, ok := emailparse.ParseTradeEmail(inst, e.Subject, e.TextBody); ok {
-		return persistTrade(db, trade, e, emailDate)
+	for _, c := range rules {
+		if !c.Matches(e.From, fromDomain, e.Subject, text) {
+			continue
+		}
+		ext, err := c.Apply(text)
+		if err != nil {
+			continue
+		}
+		out := persistExtraction(db, c.Rule, ext, e, text, emailDate)
+		out.RuleID = c.Rule.ID
+		return out
 	}
+	return unrecognized()
+}
 
-	// Zerodha's own mail (Coin allotments, contract notes, demat holding
-	// statements, and the funding notices that must NOT become bank
-	// transactions) is handled on its own path. Anything that isn't one of
-	// those falls through to the ordinary pipeline below unchanged.
-	if inst != nil && inst.Issuer == "Zerodha" {
-		if out, handled := persistZerodhaMail(db, inst, e, emailDate, lookup); handled {
+func persistExtraction(db *sql.DB, rule *parserules.Rule, ext parserules.Extraction, e *emailparse.Email, text, emailDate string) Outcome {
+	name := institutionName(rule)
+	facts := parserules.ToFacts(ext)
+
+	switch rule.Kind {
+	case parserules.KindTransaction:
+		txn := parserules.ToTransaction(rule, ext, text, emailDate)
+		hint := ledger.AccountHint{
+			Issuer: rule.Issuer, Name: name,
+			Last4: firstNonEmpty(txn.AccountLast4, facts.Last4), Kind: rule.AccountType,
+		}
+		accountID, out, ok := resolveOrPend(db, hint, rule.AccountID)
+		if !ok {
 			return out
 		}
-	}
+		return persistTransaction(db, accountID, txn, facts, emailDate)
 
-	if emailparse.IsBillEmail(e.Subject) {
-		return persistBill(db, issuer, institutionName, e, facts, emailDate)
-	}
-
-	txn := parseTransaction(issuer, e)
-	if txn == nil || txn.Amount == 0 {
-		// No transaction — but if the bank stated a balance, that is still
-		// worth having. This is what a "balance update" email is, and it used
-		// to be discarded entirely.
-		if facts.BalanceKnown {
-			return persistBalanceOnly(db, issuer, institutionName, kind, facts, emailDate)
+	case parserules.KindBill:
+		bill := parserules.ToBill(rule, ext)
+		// A statement is about a card whatever the rule's default says, unless
+		// the rule was explicitly made for a loan.
+		kind := rule.AccountType
+		if kind != "loan" {
+			kind = "credit_card"
 		}
-		return unrecognized()
-	}
+		hint := ledger.AccountHint{Issuer: rule.Issuer, Name: name, Last4: bill.CardLast4, Kind: kind}
+		accountID, out, ok := resolveOrPend(db, hint, rule.AccountID)
+		if !ok {
+			return out
+		}
+		return persistBill(db, accountID, bill, e, facts, emailDate)
 
-	last4 := firstNonEmpty(txn.AccountLast4, facts.AccountLast4)
-	accountID := ledger.ResolveAccount(db, ledger.AccountHint{
-		Issuer: issuer, Name: institutionName, Last4: last4, Kind: kind,
-	})
-	if accountID == 0 {
-		return unrecognized()
+	case parserules.KindBalance:
+		if !facts.BalanceKnown {
+			return unrecognized()
+		}
+		hint := ledger.AccountHint{Issuer: rule.Issuer, Name: name, Last4: facts.Last4, Kind: rule.AccountType}
+		accountID, out, ok := resolveOrPend(db, hint, rule.AccountID)
+		if !ok {
+			return out
+		}
+		recordFacts(db, accountID, facts, emailDate)
+		return Outcome{ParsedAs: "balance", AccountID: accountID}
+
+	case parserules.KindTrade:
+		return persistTrade(db, parserules.ToTrade(rule, ext, emailDate), e, emailDate)
 	}
+	return unrecognized()
+}
+
+// institutionName is what to call the account a rule's mail concerns, before
+// the user has named it.
+func institutionName(rule *parserules.Rule) string {
+	if rule.Issuer != "" {
+		return emailparse.DisplayNameForIssuer(rule.Issuer)
+	}
+	return rule.SenderDomain
+}
+
+// resolveOrPend finds the account a message belongs to — the rule's bound
+// account, or the one its digits and institution identify — and otherwise
+// describes the account that would have to exist, as a pending outcome.
+func resolveOrPend(db *sql.DB, hint ledger.AccountHint, boundID int64) (int64, Outcome, bool) {
+	if boundID != 0 {
+		var archived string
+		if err := db.QueryRow(`SELECT archived_at FROM finance_accounts WHERE id = ?`, boundID).Scan(&archived); err == nil && archived == "" {
+			return boundID, Outcome{}, true
+		}
+	}
+	if id := ledger.MatchAccount(db, hint); id != 0 {
+		return id, Outcome{}, true
+	}
+	kind := hint.Kind
+	if kind == "" {
+		kind = "bank"
+	}
+	return 0, Outcome{
+		ParsedAs: "pending_account",
+		Pending:  &PendingHint{Issuer: hint.Issuer, Name: hint.Name, Last4: hint.Last4, Kind: kind},
+	}, false
+}
+
+func persistTransaction(db *sql.DB, accountID int64, txn *models.ParsedEmailTransaction,
+	facts parserules.AccountFacts, emailDate string) Outcome {
 
 	if txn.TxnDate == "" {
 		// A transaction with no date sorts nowhere and drops out of every
@@ -445,8 +581,14 @@ func PersistWithPasswords(db *sql.DB, inst *emailparse.Institution, e *emailpars
 
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		// Already have this transaction. The link row still gets written, so
-		// the inbox shows the message as recognized rather than as a failure.
+		// Already have this transaction (the bank sent the alert twice, say).
+		// Link the message to the row it describes, so the inbox shows it as
+		// recognized and jumps to the right place.
+		var existing int64
+		if err := db.QueryRow(`SELECT id FROM transactions WHERE account_id = ? AND dedupe_hash = ?`,
+			accountID, dedupe).Scan(&existing); err == nil {
+			return Outcome{ParsedAs: "transaction", TransactionID: &existing, AccountID: accountID}
+		}
 		return Outcome{ParsedAs: "unrecognized", AccountID: accountID}
 	}
 	id, _ := res.LastInsertId()
@@ -463,60 +605,15 @@ func PersistWithPasswords(db *sql.DB, inst *emailparse.Institution, e *emailpars
 	return Outcome{ParsedAs: "transaction", TransactionID: &id, AccountID: accountID}
 }
 
-// parseTransaction runs the issuer's own parser where one exists and falls back
-// to the shared alert reader everywhere else — which is what lets an issuer
-// nobody has written a parser for still produce transactions.
-func parseTransaction(issuer string, e *emailparse.Email) *models.ParsedEmailTransaction {
-	switch issuer {
-	case "HDFC":
-		if emailparse.IsHDFCBalanceUpdate(e.TextBody) {
-			return nil // a snapshot, handled as a balance rather than a transaction
-		}
-		if txn, ok := emailparse.ParseHDFCEmail(e.Subject, e.TextBody); ok {
-			return txn
-		}
-	case "Axis":
-		if txn, ok := emailparse.ParseAxisEmail(e.Subject, e.TextBody); ok {
-			return txn
-		}
-	}
-	if emailparse.IsBalanceOnlyAlert(e.Subject, e.TextBody) {
-		return nil
-	}
-	if txn, ok := emailparse.ParseGenericAlert(e.Subject, e.TextBody); ok {
-		return txn
-	}
-	return nil
-}
-
-func persistBill(db *sql.DB, issuer, institutionName string, e *emailparse.Email,
-	facts emailparse.AccountFacts, emailDate string) Outcome {
-
-	bill := emailparse.ParseBillEmail(issuer, e.Subject, e.TextBody)
-	if bill.CardLast4 == "" {
-		bill.CardLast4 = facts.AccountLast4
-	}
-
-	// A statement is always about a card, whatever the sender's default kind.
-	// The card product name is preferred over the bank's: an issuer sends
-	// statements for several cards, and naming them all after the bank would
-	// pile every one of them into a single account.
-	accountID := ledger.ResolveAccount(db, ledger.AccountHint{
-		Issuer: issuer,
-		Name:   firstNonEmpty(bill.CardName, institutionName),
-		Last4:  bill.CardLast4,
-		Kind:   string(emailparse.KindCreditCard),
-	})
-	if accountID == 0 {
-		// A due date attached to nothing cannot be reconciled — this is a
-		// genuine failure to record the card, not a missing approval.
-		return unrecognized()
-	}
+func persistBill(db *sql.DB, accountID int64, bill models.ParsedBillEmail, e *emailparse.Email,
+	facts parserules.AccountFacts, emailDate string) Outcome {
 
 	// Issuers resend statements (reminders, duplicates on request). The unique
 	// index on (issuer, card, period) turns the resend into an update of the
 	// bill already on the dashboard rather than a second copy of it.
-	res, err := db.Exec(`
+	// RETURNING, not LastInsertId: an upsert that updates leaves last_insert_rowid at another table's row.
+	var id int64
+	if err := db.QueryRow(`
 		INSERT INTO bills (account_id, issuer, card_last4, statement_period, total_due, minimum_due, due_date)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(issuer, card_last4, statement_period) WHERE statement_period != ''
@@ -524,18 +621,11 @@ func persistBill(db *sql.DB, issuer, institutionName string, e *emailparse.Email
 			account_id  = COALESCE(excluded.account_id, bills.account_id),
 			total_due   = COALESCE(excluded.total_due, bills.total_due),
 			minimum_due = COALESCE(excluded.minimum_due, bills.minimum_due),
-			due_date    = CASE WHEN excluded.due_date != '' THEN excluded.due_date ELSE bills.due_date END`,
+			due_date    = CASE WHEN excluded.due_date != '' THEN excluded.due_date ELSE bills.due_date END
+		RETURNING id`,
 		ledger.NullIfZeroID(accountID), bill.Issuer, bill.CardLast4,
-		bill.StatementPeriod, bill.TotalDue, bill.MinimumDue, bill.DueDate)
-	if err != nil {
+		bill.StatementPeriod, bill.TotalDue, bill.MinimumDue, bill.DueDate).Scan(&id); err != nil {
 		return unrecognized()
-	}
-	id, _ := res.LastInsertId()
-	if id == 0 {
-		// An ON CONFLICT update reports no new row id; find the one we updated
-		// so the message still links to a bill.
-		db.QueryRow(`SELECT id FROM bills WHERE issuer = ? AND card_last4 = ? AND statement_period = ?`,
-			bill.Issuer, bill.CardLast4, bill.StatementPeriod).Scan(&id)
 	}
 
 	for _, att := range e.PDFAttachments {
@@ -550,9 +640,6 @@ func persistBill(db *sql.DB, issuer, institutionName string, e *emailparse.Email
 	}
 
 	recordFacts(db, accountID, facts, emailDate)
-	if id == 0 {
-		return Outcome{ParsedAs: "unrecognized", AccountID: accountID}
-	}
 	return Outcome{ParsedAs: "bill", BillID: &id, AccountID: accountID}
 }
 
@@ -585,129 +672,9 @@ func persistTrade(db *sql.DB, trade *models.ParsedTrade, e *emailparse.Email, em
 	return Outcome{ParsedAs: "trade", InvestmentID: investmentID}
 }
 
-// persistZerodhaMail handles the shapes of mail specific to Zerodha: it
-// returns handled=false for anything that isn't one of them, so the caller
-// falls through to the ordinary bill/transaction/balance pipeline unchanged.
-func persistZerodhaMail(db *sql.DB, inst *emailparse.Institution, e *emailparse.Email, emailDate string, lookup PDFPasswordLookup) (out Outcome, handled bool) {
-	// Zerodha's own notice that money moved into or out of the trading
-	// account balance. The real movement is already a bank-side transaction
-	// (an HDFC UPI debit, say) that the transfer-reclassification below picks
-	// up; this email must produce nothing of its own. See
-	// IsZerodhaFundingNoticeEmail for why letting it reach the generic reader
-	// would book a phantom transaction.
-	if emailparse.IsZerodhaFundingNoticeEmail(e.Subject) {
-		return unrecognized(), true
-	}
-
-	if trades := emailparse.ParseCoinAllotment(e.Subject, e.TextBody); len(trades) > 0 {
-		return persistZerodhaTrades(db, trades, e, emailDate), true
-	}
-
-	wantsPDF := emailparse.IsZerodhaContractNoteEmail(e.Subject) || emailparse.IsZerodhaHoldingStatementEmail(e.Subject)
-	if !wantsPDF || len(e.PDFAttachments) == 0 {
-		return Outcome{}, false
-	}
-
-	var password string
-	var ok bool
-	if lookup != nil {
-		password, ok = lookup(inst.Issuer)
-	}
-	if !ok {
-		return pendingPDFPassword(), true
-	}
-
-	text, err := pdfparse.ExtractText(e.PDFAttachments[0].Content, password)
-	if err != nil {
-		// Wrong or since-changed password. Held for retry rather than
-		// discarded — fixing it in Settings and syncing again picks this
-		// message back up, the same way a missing password does.
-		return pendingPDFPassword(), true
-	}
-
-	if emailparse.IsZerodhaContractNoteEmail(e.Subject) {
-		trades := emailparse.ParseZerodhaContractNoteText(text)
-		if len(trades) == 0 {
-			return unrecognized(), true
-		}
-		return persistZerodhaTrades(db, trades, e, emailDate), true
-	}
-
-	asOf, holdings := emailparse.ParseZerodhaHoldingsSnapshot(text)
-	if len(holdings) == 0 {
-		return unrecognized(), true
-	}
-	var lastID int64
-	for _, h := range holdings {
-		id, err := ledger.RecordHoldingSnapshot(db, models.ParsedTrade{
-			Symbol: h.Name, Identifier: h.ISIN, Broker: inst.Issuer,
-			Currency: "INR", Kind: emailparse.KindForISIN(h.ISIN),
-		}, h.Units, h.Rate, h.Value, asOf)
-		if err != nil {
-			log.Printf("ingest: recording Zerodha holding %s (%s): %v", h.Name, h.ISIN, err)
-			continue
-		}
-		lastID = id
-	}
-	if lastID == 0 {
-		return unrecognized(), true
-	}
-	return Outcome{ParsedAs: "trade", InvestmentID: lastID}, true
-}
-
-// persistZerodhaTrades stores every trade parsed from one Zerodha email.
-//
-// Unlike INDmoney's order mails (always exactly one instrument), a Coin
-// allotment or a contract note commonly names several: each is its own trade,
-// deduplicated on the instrument and side within the message rather than on
-// the message alone, so a mail naming five funds doesn't collapse into one.
-func persistZerodhaTrades(db *sql.DB, trades []models.ParsedTrade, e *emailparse.Email, emailDate string) Outcome {
-	var lastID int64
-	stored := 0
-	for i := range trades {
-		t := &trades[i]
-		if t.TradeDate == "" {
-			t.TradeDate = emailDate
-		}
-		investmentID, err := ledger.ResolveHolding(db, t)
-		if err != nil || investmentID == 0 {
-			continue
-		}
-
-		base := e.MessageID
-		if base == "" {
-			base = fmt.Sprintf("%s|%s", t.Broker, t.TradeDate)
-		}
-		dedupe := fmt.Sprintf("%s|%s|%s", base, t.Identifier, t.Side)
-
-		if _, err := ledger.RecordTrade(db, investmentID, t, dedupe); err != nil {
-			continue
-		}
-		lastID = investmentID
-		stored++
-	}
-	if stored == 0 {
-		return unrecognized()
-	}
-	return Outcome{ParsedAs: "trade", InvestmentID: lastID}
-}
-
-func persistBalanceOnly(db *sql.DB, issuer, institutionName, kind string,
-	facts emailparse.AccountFacts, emailDate string) Outcome {
-
-	accountID := ledger.ResolveAccount(db, ledger.AccountHint{
-		Issuer: issuer, Name: institutionName, Last4: facts.AccountLast4, Kind: kind,
-	})
-	if accountID == 0 {
-		return unrecognized()
-	}
-	recordFacts(db, accountID, facts, emailDate)
-	return Outcome{ParsedAs: "balance", AccountID: accountID}
-}
-
-// recordFacts writes the balance and limit an alert reported. Both are
-// no-ops when the alert didn't carry them.
-func recordFacts(db *sql.DB, accountID int64, facts emailparse.AccountFacts, emailDate string) {
+// recordFacts writes the balance and limit a message reported. Both are
+// no-ops when it didn't carry them.
+func recordFacts(db *sql.DB, accountID int64, facts parserules.AccountFacts, emailDate string) {
 	if accountID == 0 {
 		return
 	}
@@ -719,6 +686,14 @@ func recordFacts(db *sql.DB, accountID int64, facts emailparse.AccountFacts, ema
 		ledger.RecordBalanceSnapshot(db, accountID, asOf, facts.Balance, "email")
 	}
 	ledger.RecordCreditLimit(db, accountID, facts.CreditLimit)
+}
+
+func domainOf(email string) string {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if at := strings.LastIndex(email, "@"); at != -1 {
+		return email[at+1:]
+	}
+	return ""
 }
 
 func firstNonEmpty(values ...string) string {

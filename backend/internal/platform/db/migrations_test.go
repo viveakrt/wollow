@@ -185,10 +185,23 @@ func TestOpenMigratesLegacyDatabase(t *testing.T) {
 	if _, err := conn.Exec(`UPDATE messages SET rfc_message_id = 'x' WHERE id = 1`); err != nil {
 		t.Errorf("messages.rfc_message_id missing after migration: %v", err)
 	}
-	for _, table := range []string{"finance_accounts", "transactions", "bills", "message_links", "categories"} {
+	for _, table := range []string{"finance_accounts", "transactions", "bills", "message_links", "categories", "email_parser_rules"} {
 		if exists, _ := tableExists(conn, table); !exists {
 			t.Errorf("Money table %q was not created", table)
 		}
+	}
+	if _, err := conn.Exec(`UPDATE finance_accounts SET archived_at = '' WHERE id = 0`); err != nil {
+		t.Errorf("finance_accounts.archived_at missing after migration: %v", err)
+	}
+	if _, err := conn.Exec(`UPDATE message_links SET rule_id = NULL, pending_last4 = '' WHERE id = 0`); err != nil {
+		t.Errorf("message_links rule/pending columns missing after migration: %v", err)
+	}
+	if _, err := conn.Exec(`UPDATE investments SET quote_symbol = '', quote_error = '', price_source = '',
+		realized_gain = 0, realized_gain_inr = NULL, invested_inr = NULL WHERE id = 0`); err != nil {
+		t.Errorf("investments market columns missing after migration: %v", err)
+	}
+	if _, err := conn.Exec(`UPDATE investment_trades SET fx_rate = NULL WHERE id = 0`); err != nil {
+		t.Errorf("investment_trades.fx_rate missing after migration: %v", err)
 	}
 
 	// The renamed table must still be a valid FK target.
